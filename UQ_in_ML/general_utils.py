@@ -23,12 +23,15 @@ def preprocess_prior(prior, n_layers=None):
             raise ValueError('For a gaussian prior, the variance should be provided.')
         if not isinstance(prior['variance'], list):
             prior['variance'] = [prior['variance']]*n_layers
+        prior['variance'] = [float(v) for v in prior['variance']]
     if prior['type'].lower() == 'gaussian_mixture':
         if ('variance_1' not in prior.keys()) or ('variance_2' not in prior.keys()) or ('proba_1' not in prior.keys()):
             raise ValueError('For a gaussian_mixture prior, variance_1, variance_2, proba_1 should be provided.')
         for key in ['variance_1', 'variance_2', 'proba_1']:
             if not isinstance(prior[key], list):
                 prior[key] = [prior[key]]*n_layers
+        for key in ['variance_1', 'variance_2', 'proba_1']:
+            prior[key] = [float(v) for v in prior['key']]
     return prior
 
 

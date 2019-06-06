@@ -323,41 +323,48 @@ class BayesByEnsemble(Regressor):
 
 
 class BayesByBackprop(Regressor):
+    """ BayesByBackprop algorithm, from 'Weight Uncertainty in Neural Networks', Blundell et al., 2015. """
 
     def __init__(self, units_per_layer, prior, pre_model=None, input_dim=None, output_dim=1,
-                 var_n=1e-6, activation='tanh', posterior_type='gaussian', hidden_weights_to_track=None):
+                 var_n=1e-6, activation='tanh', posterior_type='gaussian', n_weights_to_track=None):
+        """ Initialize the network and define the cost function. """
 
         tf.reset_default_graph()
 
-        # Do the initial checks and computations
+        # Do the initial checks and computations for the network
         super().__init__(units_per_layer=units_per_layer, prior=prior, pre_model=pre_model, input_dim=input_dim,
                          output_dim=output_dim, var_n=var_n, activation=activation)
+        if n_weights_to_track is None:  # do not save any weights
+            n_weights_to_track = [0] * (len(units_per_layer) + 1)
+        elif isinstance(n_weights_to_track, int):
+            n_weights_to_track = [n_weights_to_track] * (len(units_per_layer) + 1)
+        if (not isinstance(n_weights_to_track, list)) or (len(n_weights_to_track) != len(units_per_layer) + 1):
+            raise TypeError('Input weights_to_track should be a list of length len(units_per_layer)+1 or an integer.')
+        self.n_weights_to_track = n_weights_to_track
 
-
-
-        self.cost_prior = 0.
-        self.cost_var_post = 0.
+        # Initialize necessary variables and placeholders
+        X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, input_dim))  # input data
+        y_ = tf.placeholder(dtype=tf.float32, name='y_', shape=(None, output_dim))  # output data
+        ns_ = tf.placeholder(dtype=tf.int32, name='ns_', shape=())  # number of samples in MC approximation of cost
+        ndata = tf.shape(X_)[0]  # number of independent data points
+        self.cost_prior = 0.  # contribution of prior to cost: -log(p(w))
+        self.cost_var_post = 0.  # contribution of variational posterior: log(q_{theta}(w))
         self.means_ = []
         self.stds_ = []
-        X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, input_dim))
-        y_ = tf.placeholder(dtype=tf.float32, name='y_', shape=(None, output_dim))
-        ns_ = tf.placeholder(dtype=tf.int32, name='ns_', shape=())
-        ndata = tf.shape(X_)[0]
 
         x = X_
         if pre_model is not None:
             for layer in pre_model.layers[1:]:  # layer 0 will be an input layer
                 x = layer(x)
         x = tf.tile(tf.expand_dims(x, 0), [ns_, 1, 1])
-        print(x.get_shape().as_list())
-        # add dense Bayes layers
-        for l, units in enumerate(units_per_layer+(output_dim,)):
+        # add dense layers, add contributions of each layer to prior and variational posterior costs
+        for l, units in enumerate(units_per_layer + (output_dim, )):
             prior_layer = dict([(key, val[l]) for key, val in prior.items()])
             prior_layer['type'] = prior['type']
 
-            # Define the parameters of the variational distribution to be trained
+            # Define the parameters of the variational distribution to be trained: theta={mu, rho} for kernel and bias
             mu_kernel = tf.Variable(
-                tf.random_normal(shape=self.kernel_shapes[l], mean=0., stddev=np.sqrt(self.glorot_var[l])),
+                tf.random_normal(shape=self.kernel_shapes[l], mean=0., stddev=0.1),
                 name='mu_kernel_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             rho_kernel = tf.Variable(
                 -6 * tf.ones(shape=self.kernel_shapes[l], dtype=tf.float32),
@@ -365,20 +372,20 @@ class BayesByBackprop(Regressor):
             sigma_kernel = tf.log(1. + tf.exp(rho_kernel))
 
             mu_bias = tf.Variable(
-                tf.random_normal(shape=self.bias_shapes[l], mean=0., stddev=np.sqrt(self.glorot_var[l])),
+                tf.random_normal(shape=self.bias_shapes[l], mean=0., stddev=0.1),
                 name='mu_bias_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             rho_bias = tf.Variable(
                 -6 * tf.ones(shape=self.bias_shapes[l], dtype=tf.float32),
                 name='rho_bias_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             sigma_bias = tf.log(1. + tf.exp(rho_bias))
 
-            # keep track of some of the weights
-            #tmp = tf.reshape(mu_kernel[:, :, 0], shape=(-1,))
-            #self.means_.extend(tmp[i] for i in [0, 1, 2])
-            #tmp = tf.reshape(sigma_kernel[:, :, 0], shape=(-1,))
-            #self.stds_.extend(tmp[i] for i in [0, 1, 2])
+            # Keep track of some of the weights
+            tmp = tf.reshape(mu_kernel[:, :], shape=(-1,))
+            self.means_.extend(tmp[i] for i in range(n_weights_to_track[l]))
+            tmp = tf.reshape(sigma_kernel[:, :], shape=(-1,))
+            self.stds_.extend(tmp[i] for i in range(n_weights_to_track[l]))
 
-            # Samples ns_ biases and kernels from the variational distribution
+            # Samples ns_ biases and kernels from the variational distribution q_{theta}(w)
             kernel = tf.add(tf.tile(tf.expand_dims(mu_kernel, 0), [ns_, 1, 1]),
                             tf.multiply(tf.tile(tf.expand_dims(sigma_kernel, 0), [ns_, 1, 1]),
                                         tf.random_normal(shape=(ns_,) + self.kernel_shapes[l], mean=0., stddev=1.))
@@ -388,24 +395,17 @@ class BayesByBackprop(Regressor):
                                       tf.random_normal(shape=(ns_,) + self.bias_shapes[l], mean=0., stddev=1.))
                           )
 
-            print(x.get_shape().as_list())
-            print(kernel.get_shape().as_list())
-            print(bias.get_shape().as_list())
-            print(tf.matmul(x, kernel).get_shape().as_list())
+            # Compute activation(W X + b) for this layer, with w={W, b} sampled from q_{theta}(w)
             x = tf.add(tf.matmul(x, kernel),
                        tf.tile(tf.expand_dims(bias, 1), [1, ndata, 1]))
-            print(x.get_shape().as_list())
             assert len(x.get_shape().as_list()) == 3
-
             if l < len(units_per_layer):
                 if activation is 'tanh':
                     x = tf.nn.tanh(x)
                 elif activation is 'relu':
                     x = tf.nn.relu(x)
 
-            print('pass 1')
-
-            # compute the cost from the prior term -log(prior(omega))
+            # Compute the cost from the prior term -log(p(w))
             if prior['type'].lower() == 'gaussian':
                 kwargs = {'mu': 0., 'std': np.sqrt(prior['variance'][l]).astype(np.float32)}
                 self.cost_prior -= log_gaussian(x=kernel, **kwargs)
@@ -419,9 +419,7 @@ class BayesByBackprop(Regressor):
             else:
                 raise ValueError('Prior must be gaussian or gaussian_mixture.')
 
-            print('pass 2')
-
-            # compute the cost from the variational distribution term log(var_post_{theta}(omega))
+            # Compute the cost from the variational distribution term log(q_{theta}(w))
             if posterior_type.lower() == 'gaussian':
                 self.cost_var_post += log_gaussian(x=kernel,
                                                    mu=tf.tile(tf.expand_dims(mu_kernel, axis=0), [ns_, 1, 1]),
@@ -432,14 +430,10 @@ class BayesByBackprop(Regressor):
             else:
                 raise ValueError('Variational posterior must be gaussian.')
 
-            print('pass 3')
-
-        # compute cost due to likelihood
+        # Compute contribution of likelihood to cost: - log p(data|w)
         self.predictions = x
         assert len(self.predictions.get_shape().as_list()) == 3
         self.cost_likelihood = self.loglike_cost(tf.tile(tf.expand_dims(y_, 0), [ns_, 1, 1]), self.predictions)
-
-        print('pass 4')
 
         # all costs have been summed over ns_ samples, take the average
         self.cost_likelihood /= tf.to_float(ns_)
@@ -449,97 +443,118 @@ class BayesByBackprop(Regressor):
         # the global cost is the sum of all three costs
         self.cost = self.cost_prior + self.cost_likelihood + self.cost_var_post
 
-    def fit(self, X, y, epochs=100, ns=10, verbose=0, lr=0.001, n_omega=3):
+    def fit(self, X, y, epochs=100, ns=10, verbose=0, lr=0.001):
+        """ Fit the network to data, i.e., learn the parameters theta of the variational distribution. """
 
-        # n_omega is the nb of weights to save for plotting
-
-        X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
-        y_ = tf.get_default_graph().get_tensor_by_name('y_:0')
-        ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
-
-        print(tf.trainable_variables())
+        # Set-up the training procedure
+        #print(tf.trainable_variables())
         opt = tf.train.AdamOptimizer(learning_rate=lr)
         total_grads_and_vars = opt.compute_gradients(self.cost, tf.trainable_variables())
         grad_step = opt.apply_gradients(total_grads_and_vars)
 
-        # initilize tensorflow session
-        self.sess = tf.Session()
-        # Run training loop
-        #with self.sess.as_default():
+        # Initilize tensorflow session (the same will be used later for ) and required variables
+        X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
+        y_ = tf.get_default_graph().get_tensor_by_name('y_:0')
+        ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
         init_op = tf.global_variables_initializer()
+        loss_history, means_history, stds_history = [], [], []
+        self.sess = tf.Session()
         self.sess.run(init_op)
 
-        loss_history = []
-        means_history = []
-        stds_history = []
+        # Run training loop
         for e in range(epochs):
             # apply the gradient descent step
             self.sess.run(grad_step, feed_dict={X_: X, y_: y, ns_: ns})
-            loss_history_ = self.sess.run([self.cost_var_post, self.cost_prior, self.cost_likelihood, self.cost],
+            # save the loss
+            loss_history_ = self.sess.run([self.cost, self.cost_var_post, self.cost_prior, self.cost_likelihood],
                                           feed_dict={X_: X, y_: y, ns_: ns})
             loss_history.append(loss_history_)
-
-            mean, std = self.sess.run([self.means_, self.stds_], feed_dict={X_: X, y_: y, ns_: ns})
-            #means_history.append(mean)
-            #stds_history.append(std)
-
+            # save some of the weights
+            if any(self.n_weights_to_track) != 0:
+                mean, std = self.sess.run([self.means_, self.stds_], feed_dict={X_: X, y_: y, ns_: ns})
+                means_history.append(mean)
+                stds_history.append(std)
+            # print comments on terminal
             if verbose:
                 print('epoch = {}, loss = {}'.format(e, loss_history[-1][-1]))
+
         # self.loss_history is a matrix of size (epochs, 4)
         self.loss_history = np.array(loss_history)
-        # self.means_history is a matrix of size (epochs, n_omega)
-        #self.means_history = np.array(means_history)
-        #self.stds_history = np.array(stds_history)
+        # self.theta_history is a matrix of size (epochs, sum(self.n_weights_to_track), 2)
+        if any(self.n_weights_to_track) != 0:
+            self.theta_history = np.stack([np.array(means_history), np.array(stds_history)], axis=-1)
+        else:
+            self.theta_history = None
 
     def predict_UQ(self, X, ns=100, output_MC=False):
-        # predict for unseen X, mean and standard deviations
+        """ Predict output and uncertainty for new input data. """
+
         X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
         ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
+        # pred_MC is a ndarray of shape (ns, ndata, ny)
         pred_MC = self.sess.run(self.predictions, feed_dict={X_: X, ns_: ns})
-        #print(self.sess.run(self.stds_, feed_dict={X_: X, ns_: ns}))
+
         # get the mean as average over all predictions
         estimated_mean = np.mean(pred_MC, axis=0)
-        # get the uncertainty: aleatoric + epistemic
+
+        # get the aleatoric + epistemic uncertainty (variance) in each dimension of the output
         aleatoric_noise = self.var_n
         if isinstance(aleatoric_noise, np.ndarray):
             aleatoric_noise = np.diag(aleatoric_noise).reshape((1, self.output_dim))
         estimated_var = aleatoric_noise + np.var(pred_MC, axis=0)
+
+        # return all the posterior runs or just the mean and std
         if output_MC:
             return estimated_mean, np.sqrt(estimated_var), pred_MC
         return estimated_mean, np.sqrt(estimated_var), None
 
 
 class alphaBB(Regressor):
+    """alpha-BlackBox algorithm, from 'Black-Box α-Divergence Minimization', Hernández-Lobato, 2016"""
 
     def __init__(self, units_per_layer, prior, alpha, pre_model=None, input_dim=None, output_dim=1,
-                 var_n=1e-6, activation='tanh', posterior_type='gaussian'):
+                 var_n=1e-6, activation='tanh', posterior_type='gaussian', n_weights_to_track=None):
+        """ Initialize the network and define the cost function. """
 
         tf.reset_default_graph()
 
+        # Do the initial checks and computations for the network
         super().__init__(units_per_layer=units_per_layer, prior=prior, pre_model=pre_model, input_dim=input_dim,
                          output_dim=output_dim, var_n=var_n, activation=activation)
+        self.alpha = alpha
+        if self.alpha <= 0. or self.alpha >= 1.:
+            raise ValueError('Input alpha must be between 0 and 1')
+        if n_weights_to_track is None:  # do not save any weights
+            n_weights_to_track = [0] * (len(units_per_layer) + 1)
+        elif isinstance(n_weights_to_track, int):
+            n_weights_to_track = [n_weights_to_track] * (len(units_per_layer) + 1)
+        if (not isinstance(n_weights_to_track, list)) or (len(n_weights_to_track) != len(units_per_layer) + 1):
+            raise TypeError('Input weights_to_track should be a list of length len(units_per_layer)+1 or an integer.')
+        self.n_weights_to_track = n_weights_to_track
 
-        normalization_term = 0.
-        log_factor = 0.
-
-        X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, input_dim))
-        y_ = tf.placeholder(dtype=tf.float32, name='y_', shape=(None, output_dim))
-        ns_ = tf.placeholder(dtype=tf.int32, name='ns_', shape=())
-        ndata = tf.shape(X_)[0]
+        # Initialize necessary variables and placeholders
+        X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, input_dim))  # input data
+        y_ = tf.placeholder(dtype=tf.float32, name='y_', shape=(None, output_dim))  # output data
+        ns_ = tf.placeholder(dtype=tf.int32, name='ns_', shape=())  # number of samples in MC approximation of cost
+        ndata = tf.shape(X_)[0]  # number of independent data points
+        self.normalization_term = 0.  # contribution of normalization terms to cost: -log(Z(prior))-log(Z(q))
+        self.log_factor = 0.  # log of the site approximations f: log(f(w))=s(w).T lambda_{f}
+        self.means_ = []
+        self.stds_ = []
 
         x = X_
         if pre_model is not None:
             for layer in pre_model.layers[1:]:
                 x = layer(x)
-        x = tf.tile(tf.expand_dims(x, -1), [ns_, 1, 1])
-        # add dense Bayes layers
+        x = tf.tile(tf.expand_dims(x, 0), [ns_, 1, 1])
+        # add dense layers and compute normalization term of the cost for all layers
         for l, units in enumerate(units_per_layer + (output_dim,)):
             prior_layer = dict([(key, val[l]) for key, val in prior.items()])
             prior_layer['type'] = prior['type']
 
-            # Define the variables we optimize for: mu, rho of kernel and bias
+            # Define the parameters of the variational distribution to be trained: theta={mu, rho} for kernel and bias
             mu_kernel = tf.Variable(
-                    tf.random_normal(shape=self.kernel_shapes[l], mean=0., stddev=np.sqrt(self.glorot_var[l])),
+                    tf.random_normal(shape=self.kernel_shapes[l], mean=0., stddev=0.1),
                     name='mu_kernel_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             rho_kernel = tf.Variable(
                     -6 * tf.ones(shape=self.kernel_shapes[l], dtype=tf.float32),
@@ -547,29 +562,38 @@ class alphaBB(Regressor):
             sigma_kernel = tf.log(1. + tf.exp(rho_kernel))
 
             mu_bias = tf.Variable(
-                    tf.zeros(shape=self.bias_shapes[l], dtype=tf.float32),
+                    tf.random_normal(shape=self.bias_shapes[l], mean=0., stddev=0.1),
                     name='mu_bias_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             rho_bias = tf.Variable(
                     -6 * tf.ones(shape=self.bias_shapes[l], dtype=tf.float32),
                     name='rho_bias_layer_{}'.format(l), trainable=True, dtype=tf.float32)
             sigma_bias = tf.log(1. + tf.exp(rho_bias))
 
-            normalization_term += tf.reduce_sum(0.5 * tf.log(self.prior['variance'][l])
+            # Keep track of some of the weights
+            tmp = tf.reshape(mu_kernel[:, :], shape=(-1,))
+            self.means_.extend(tmp[i] for i in range(n_weights_to_track[l]))
+            tmp = tf.reshape(sigma_kernel[:, :], shape=(-1,))
+            self.stds_.extend(tmp[i] for i in range(n_weights_to_track[l]))
+
+            # compute normalization term: -log(Z(prior))-log(Z(q))
+            self.normalization_term += tf.reduce_sum(0.5 * tf.log(self.prior['variance'][l])
                                                      - tf.log(sigma_kernel)
                                                      - 0.5 * tf.square(tf.divide(mu_kernel, sigma_kernel)))
-            normalization_term += tf.reduce_sum(0.5 * tf.log(self.prior['variance'][l])
+            self.normalization_term += tf.reduce_sum(0.5 * tf.log(self.prior['variance'][l])
                                                      - tf.log(sigma_bias)
                                                      - 0.5 * tf.square(tf.divide(mu_bias, sigma_bias)))
 
-            # compute the biases and kernels and apply transformation to data
-            kernel = tf.add(tf.tile(tf.expand_dims(mu_kernel, -1), [ns_, 1, 1]),
-                            tf.multiply(tf.tile(tf.expand_dims(sigma_kernel, -1), [ns_, 1, 1]),
+            # Samples ns_ biases and kernels from the variational distribution q_{theta}(w)
+            kernel = tf.add(tf.tile(tf.expand_dims(mu_kernel, 0), [ns_, 1, 1]),
+                            tf.multiply(tf.tile(tf.expand_dims(sigma_kernel, 0), [ns_, 1, 1]),
                                         tf.random_normal(shape=(ns_,) + self.kernel_shapes[l], mean=0., stddev=1.))
                             )
-            bias = tf.add(tf.tile(tf.expand_dims(mu_bias, -1), [ns_, 1]),
-                          tf.multiply(tf.tile(tf.expand_dims(sigma_bias, -1), [ns_, 1]),
+            bias = tf.add(tf.tile(tf.expand_dims(mu_bias, 0), [ns_, 1]),
+                          tf.multiply(tf.tile(tf.expand_dims(sigma_bias, 0), [ns_, 1]),
                                       tf.random_normal(shape=(ns_,) + self.bias_shapes[l], mean=0., stddev=1.))
                           )
+
+            # Compute activation(W X + b) for this layer, with w={W, b} sampled from q_{theta}(w)
             x = tf.add(tf.matmul(x, kernel),
                        tf.tile(tf.expand_dims(bias, 1), [1, ndata, 1]))
             assert len(x.get_shape().as_list()) == 3
@@ -579,89 +603,104 @@ class alphaBB(Regressor):
                 elif activation is 'relu':
                     x = tf.nn.relu(x)
 
-            # compute the factor parameters
-            var_f_kernel, mu_over_var_f_kernel = factor_params_gaussian(var_prior=prior['variance'][l], ndata=ndata,
+            # compute the factor parameters lambda_f, then the log of the site approximations
+            var_f_kernel, mu_over_var_f_kernel = factor_params_gaussian(var_prior=prior['variance'][l],
                                                                         mu_post=mu_kernel,
-                                                                        var_post=tf.square(sigma_kernel))
-            var_f_bias, mu_over_var_f_bias = factor_params_gaussian(var_prior=prior['variance'][l], ndata=ndata,
+                                                                        var_post=tf.square(sigma_kernel),
+                                                                        ndata=tf.to_float(ndata))
+            var_f_bias, mu_over_var_f_bias = factor_params_gaussian(var_prior=prior['variance'][l],
                                                                     mu_post=mu_bias,
-                                                                    var_post=tf.square(sigma_bias))
-            log_factor += tf.reduce_sum(
-                tf.subtract(tf.multiply(tf.tile(tf.expand_dims(mu_over_var_f_kernel, -1), [ns_, 1, 1]), kernel),
-                            tf.multiply(0.5 / tf.tile(tf.expand_dims(var_f_kernel, -1), [ns_, 1, 1]), tf.square(kernel))
+                                                                    var_post=tf.square(sigma_bias),
+                                                                    ndata=tf.to_float(ndata))
+            self.log_factor += tf.reduce_sum(
+                tf.subtract(tf.multiply(tf.tile(tf.expand_dims(mu_over_var_f_kernel, 0), [ns_, 1, 1]), kernel),
+                            tf.multiply(0.5 / tf.tile(tf.expand_dims(var_f_kernel, 0), [ns_, 1, 1]), tf.square(kernel))
                             ),
                 axis=[1, 2])
-            log_factor += tf.reduce_sum(
-                tf.subtract(tf.multiply(tf.tile(tf.expand_dims(mu_over_var_f_bias, -1), [ns_, 1]), bias),
-                            tf.multiply(0.5 / tf.tile(tf.expand_dims(var_f_bias, -1), [ns_, 1]), tf.square(bias))
+            self.log_factor += tf.reduce_sum(
+                tf.subtract(tf.multiply(tf.tile(tf.expand_dims(mu_over_var_f_bias, 0), [ns_, 1]), bias),
+                            tf.multiply(0.5 / tf.tile(tf.expand_dims(var_f_bias, 0), [ns_, 1]), tf.square(bias))
                             ),
                 axis=[1])
 
         # compute cost due to likelihood
         self.predictions = x
         assert len(self.predictions.get_shape().as_list()) == 3
+        # tie factors: use same site approximation for all data points
+        self.log_factor = tf.tile(tf.expand_dims(self.log_factor, 1), [1, ndata])
+        # compute likelihood of all data points n separately
         loglike = -1 * self.negloglike(tf.tile(tf.expand_dims(y_, 0), [ns_, 1, 1]), self.predictions)
-        logexpectation = tf.add(tf.log(1. / ns_),
-                                tf.reduce_logsumexp(alpha * tf.subtract(
-                                    loglike, tf.tile(tf.expand_dims(log_factor, 1), [1, ndata])
+        assert len(loglike.get_shape().as_list()) == 2
+        # compute log(E_{q}[(like_n(w)/f(w)) ** alpha]) for all data points n,
+        # expectation is computed by averaging over the ns_ samples
+        logexpectation = tf.add(tf.log(1. / tf.to_float(ns_)),
+                                tf.reduce_logsumexp(self.alpha * tf.subtract(
+                                    loglike, self.log_factor
                                 ), axis=0)
                                 )
-        self.cost = normalization_term - 1. / alpha * tf.reduce_sum(logexpectation)
+        # in the cost, sum over all the data points n
+        self.cost = self.normalization_term - 1. / self.alpha * tf.reduce_sum(logexpectation)
 
-    def fit(self, X, y, epochs=100, ns=10, verbose=0, lr=0.001, n_omega=3):
+    def fit(self, X, y, epochs=100, ns=10, verbose=0, lr=0.001):
+        """ Fit the network to data, i.e., learn the parameters theta of the variational distribution. """
 
-        # n_omega is the nb of weights to save for plotting
-
-        X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
-        y_ = tf.get_default_graph().get_tensor_by_name('y_:0')
-        ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
-
+        # Set-up the training procedure
         #print(tf.trainable_variables())
         opt = tf.train.AdamOptimizer(learning_rate=lr)
         total_grads_and_vars = opt.compute_gradients(self.cost, tf.trainable_variables())
         grad_step = opt.apply_gradients(total_grads_and_vars)
 
-        # initilize tensorflow session
-        self.sess = tf.Session()
-        # Run training loop
-        #with self.sess.as_default():
+        # Initilize tensorflow session (the same will be used later for ) and required variables
+        X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
+        y_ = tf.get_default_graph().get_tensor_by_name('y_:0')
+        ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
         init_op = tf.global_variables_initializer()
+        loss_history, means_history, stds_history = [], [], []
+        self.sess = tf.Session()
         self.sess.run(init_op)
 
-        loss_history = []
-        means_history = []
-        stds_history = []
+        # Run training loop
         for e in range(epochs):
             # apply the gradient descent step
             self.sess.run(grad_step, feed_dict={X_: X, y_: y, ns_: ns})
+            # save the loss
             loss_history_ = self.sess.run(self.cost, feed_dict={X_: X, y_: y, ns_: ns})
             loss_history.append(loss_history_)
-
-            #mean, std = self.sess.run([self.means_, self.stds_], feed_dict={X_: X, y_: y, ns_: ns})
-            #means_history.append(mean)
-            #stds_history.append(std)
-
+            # save some of the weights
+            if any(self.n_weights_to_track) != 0:
+                mean, std = self.sess.run([self.means_, self.stds_], feed_dict={X_: X, y_: y, ns_: ns})
+                means_history.append(mean)
+                stds_history.append(std)
+            # print comments on terminal
             if verbose:
-                print('epoch = {}, loss = {}'.format(e, loss_history[-1][-1]))
-        # self.loss_history is a matrix of size (epochs, 4)
+                print('epoch = {}, loss = {}'.format(e, loss_history[-1]))
+
+        # self.loss_history is a matrix of size (epochs, )
         self.loss_history = np.array(loss_history)
-        # self.means_history is a matrix of size (epochs, n_omega)
-        #self.means_history = np.array(means_history)
-        #self.stds_history = np.array(stds_history)
+        # self.theta_history is a matrix of size (epochs, sum(self.n_weights_to_track), 2)
+        if any(self.n_weights_to_track) != 0:
+            self.theta_history = np.stack([np.array(means_history), np.array(stds_history)], axis=-1)
+        else:
+            self.theta_history = None
 
     def predict_UQ(self, X, ns=100, output_MC=False):
-        # predict for unseen X, mean and standard deviations
+        """ Predict output and uncertainty for new input data. """
+
         X_ = tf.get_default_graph().get_tensor_by_name('X_:0')
         ns_ = tf.get_default_graph().get_tensor_by_name('ns_:0')
+        # pred_MC is a ndarray of shape (ns, ndata, ny)
         pred_MC = self.sess.run(self.predictions, feed_dict={X_: X, ns_: ns})
-        #print(self.sess.run(self.stds_, feed_dict={X_: X, ns_: ns}))
+
         # get the mean as average over all predictions
         estimated_mean = np.mean(pred_MC, axis=0)
-        # get the uncertainty: aleatoric + epistemic
+
+        # get the aleatoric + epistemic uncertainty (variance) in each dimension of the output
         aleatoric_noise = self.var_n
         if isinstance(aleatoric_noise, np.ndarray):
             aleatoric_noise = np.diag(aleatoric_noise).reshape((1, self.output_dim))
         estimated_var = aleatoric_noise + np.var(pred_MC, axis=0)
+
+        # return all the posterior runs or just the mean and std
         if output_MC:
             return estimated_mean, np.sqrt(estimated_var), pred_MC
         return estimated_mean, np.sqrt(estimated_var), None
