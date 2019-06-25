@@ -14,6 +14,8 @@ from keras.models import Model
 
 import tensorflow as tf
 
+from .general_utils import *
+
 
 # Losses
 
@@ -40,66 +42,72 @@ class l2_reg(Regularizer):
     """
     def __init__(self, weight_regularizer=0.):
         self.weight_regularizer = K.cast_to_floatx(weight_regularizer)
+
     def __call__(self, x):
+
         return self.weight_regularizer * K.sum(K.square(x))
+
     def get_config(self):
         return {'weight_regularizer': float(self.weight_regularizer)}
 
 
 class l2_reg_with_initial(Regularizer):
-    """Regularizer for L2 regularization.
+    """Regularizer for L2 regularization from initial weights != 0.
     # Arguments
-        weight_regularizer: Float; L2 regularization factor.
+        weight_regularizer: Float; L2 regularization factor
+        initial_weight
     """
-    def __init__(self, weight_regularizer, initial_weights):
+    def __init__(self, weight_regularizer, initial_weight):
         self.weight_regularizer = K.cast_to_floatx(weight_regularizer)
-        self.initial_weights = K.cast_to_floatx(initial_weights)
+        self.initial_weight = K.cast_to_floatx(initial_weight)
+
     def __call__(self, x):
-        return self.weight_regularizer * K.sum(K.square(x-self.initial_weights))
+        return self.weight_regularizer * K.sum(K.square(x-self.initial_weight))
+
     def get_config(self):
         return {'weight_regularizer': float(self.weight_regularizer),
-                'initial_weights': self.initial_weights}
+                'initial_weight': self.initial_weight}
 
 
 class prior_reg(Regularizer):
-    """Regularizer for L2 regularization.
-    # Arguments
-        weight_regularizer: Float; L2 regularization factor.
-    """
-    def __init__(self, prior):
-        self.prior = prior
+    """ Regularizer for prior regularization: add -log(p(w)) to the cost """
+
+    def __init__(self, prior_type, prior_params):
+        self.prior_type = prior_type
+        self.prior_params = prior_params
+
     def __call__(self, x):
-        if self.prior['type'].lower() == 'gaussian':
-            return K.sum(K.square(x)) / (2 * self.prior['variance'])
-        if self.prior['type'].lower() == 'gaussian_mixture':
-            term1 = self.prior['proba_1'] * (1 / K.sqrt(self.prior['variance_1']) *
-                                        K.exp(-1 * K.square(x) / (2 * self.prior['variance_1'])))
-            term2 = (1 - self.prior['proba_1']) * (1 / K.sqrt(self.prior['variance_2']) *
-                                              K.exp(-1 * K.square(x) / (2 * self.prior['variance_2'])))
-            return (-1) * K.sum(K.log(term1 + term2))
+        if self.prior_type.lower() == 'gaussian':
+            return -log_gaussian(x=x, mean=0., std=np.sqrt(self.prior_params).astype(np.float32))
+        if self.prior_type.lower() == 'gaussian_mixture':
+            return - log_gaussian_mixture(x=x, mean1=0., mean2=0.,
+                                          std1=np.sqrt(self.prior_params[0]).astype(np.float32),
+                                          std2=np.sqrt(self.prior_params[1]).astype(np.float32),
+                                          prob1=np.sqrt(self.prior_params[2]).astype(np.float32))
+
     def get_config(self):
-        return {'prior': self.prior}
+        return {'prior_type': self.prior_type, 'prior_params': self.prior_params}
 
 
 class prior_reg_with_initial(Regularizer):
-    """Regularizer for L2 regularization.
-    # Arguments
-        weight_regularizer: Float; L2 regularization factor.
-    """
-    def __init__(self, prior, initial_weights):
-        self.prior = prior
-        self.initial_weights = initial_weights
+    """ Regularizer for prior regularization: add -log(p(w-w0)) to the cost """
+
+    def __init__(self, prior_type, prior_params, initial_weight):
+        self.prior_type = prior_type
+        self.prior_params = prior_params
+        self.initial_weight = initial_weight
+
     def __call__(self, x):
-        if self.prior['type'].lower() == 'gaussian':
-            return K.sum(K.square(x)) / (2 * self.prior['variance'])
-        if self.prior['type'].lower() == 'gaussian_mixture':
-            term1 = self.prior['proba_1'] * (1 / K.sqrt(self.prior['variance_1']) *
-                                             K.exp(K.square(x-self.initial_weights) / (2 * self.prior['variance_1'])))
-            term2 = (1 - self.prior['proba_1']) * (1 / K.sqrt(self.prior['variance_2']) *
-                                                   K.exp(K.square(x-self.initial_weights) / (2 * self.prior['variance_2'])))
-            return K.sum(K.log(term1 + term2))
+        if self.prior_type.lower() == 'gaussian':
+            return -log_gaussian(x=x-self.initial_weight, mean=0., std=np.sqrt(self.prior_params).astype(np.float32))
+        if self.prior_type.lower() == 'gaussian_mixture':
+            return - log_gaussian_mixture(x=x-self.initial_weight, mean1=0., mean2=0.,
+                                          std1=np.sqrt(self.prior_params[0]).astype(np.float32),
+                                          std2=np.sqrt(self.prior_params[1]).astype(np.float32),
+                                          prob1=np.sqrt(self.prior_params[2]).astype(np.float32))
+
     def get_config(self):
-        return {'prior': self.prior}
+        return {'prior_type': self.prior_type, 'prior_params': self.prior_params, 'initial_weight': self.initial_weight}
 
 
 # Initializers
@@ -402,34 +410,41 @@ class BayesDense(Layer):
 
 # Create pre-networks
 
+from keras.applications.vgg16 import VGG16
+from keras.layers import AveragePooling2D, Reshape, Input, Lambda
 
-def build_scaling_layers(X_train):
+
+def build_scaling_layers(X_train=None, range_data=None):
+    # This pre-network scales the data to have mean 0 and unit variance
     n_data, input_dim = X_train.shape
-    mean_X_train, std_X_train = np.mean(X_train, axis=0), np.std(X_train, axis=0)
+    if X_train is not None:
+        mean_X_train, std_X_train = np.mean(X_train, axis=0), np.std(X_train, axis=0)
+    else:
+        mean_X_train = range_data[0]
+        std_X_train = range_data[1]-range_data[0]
     # create model using Functional API
     inputs = Input(shape=(input_dim,))
     outputs = Lambda(lambda x_: (x_ - mean_X_train) / std_X_train)(inputs)
-    model = Model(inputs=inputs, outputs=outputs)
-    return model
+    pre_model = Model(inputs=inputs, outputs=outputs)
+    return pre_model
 
 
-def load_VGG16(input_shape, pruning=None):
-
-    # create the base pre-trained model
-    base_model = VGG16(weights='imagenet', include_top=False, pooling=None, input_shape=input_shape)
+def load_vgg16_network(input_dim, pruning=None):
+    # This pre-model loads the VGG 16, potentially prunes it
+    base_model = VGG16(weights='imagenet', include_top=False, pooling=None, input_shape=input_dim)
     inputs = base_model.inputs
     # replace max pooling with average pooling layers
     layer_id = [3, 6, 10, 14]
     layers = [l for l in base_model.layers]
     x = layers[0].output
     count_pooling_layers = 0
-    #if pruning is None:
-    #    last_layer = len(layers)-1
-    #elif pruning in [1, 2, 3]:
-    #    last_layer = len(layers)-1-4*pruning
-    #else:
-    #    raise ValueError('Audrey :( pruning=None, 1, 2, or 3 (3 you prune a lot !!!)')
-    for i in range(1, len(layers)-1):
+    if pruning is None:
+        last_layer = len(layers)-1
+    elif pruning in [1, 2, 3]:
+        last_layer = len(layers)-1-4*pruning
+    else:
+        raise ValueError('Audrey :( pruning=None, 1, 2, or 3 (3 you prune a lot !!!)')
+    for i in range(1, last_layer):
         if i in layer_id:
             count_pooling_layers += 1
             x = AveragePooling2D(pool_size=(2, 2), name='block{}_avpool'.format(count_pooling_layers))(x)
@@ -440,15 +455,8 @@ def load_VGG16(input_shape, pruning=None):
                          name='block{}_avpool'.format(count_pooling_layers+1))(x)
     # reshape it so it is ready for classification/regression
     x = Reshape(target_shape=(int(x.shape[3]),))(x)
-    base_model = Model(inputs=inputs, outputs=x)
-    #base_model.summary()
-
-    # Last layer not to train
-    if pruning is None:
-        last_layer_untrainable = 18
-    elif pruning in [1, 2, 3]:
-        last_layer_untrainable = 18-4*pruning
-    return base_model, last_layer_untrainable
+    pre_model = Model(inputs=inputs, outputs=x)
+    return pre_model
 
 
 

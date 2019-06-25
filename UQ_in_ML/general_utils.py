@@ -8,40 +8,113 @@ from pyDOE import lhs
 from scipy.stats.distributions import norm
 import tensorflow as tf
 
+
+# Probability distributions
+
+def log_gaussian(x, mean, std, axis_sum=None):
+    log2pi = np.log(2 * np.pi).astype(np.float32)
+    return tf.reduce_sum(- 0.5 * log2pi - tf.log(std) - 0.5 * tf.square(tf.divide(tf.subtract(x, mean), std)),
+                         axis=axis_sum)
+
+
+def log_gaussian_mixture(x, mean1, mean2, std1, std2, prob1, axis_sum=None):
+    sqrt2pi = np.sqrt(2 * np.pi).astype(np.float32)
+    term1 = tf.multiply(prob1,
+                        tf.multiply(1./(sqrt2pi * std1),
+                                    tf.exp(-0.5 * tf.square(tf.divide(tf.subtract(x, mean1), std1)))
+                                    )
+                        )
+    term2 = tf.multiply(1. - prob1,
+                        tf.multiply(1. / (sqrt2pi * std2),
+                                    tf.exp(-0.5 * tf.square(tf.divide(tf.subtract(x, mean2), std2)))
+                                    )
+                        )
+    return tf.reduce_sum(tf.log(tf.add(term1, term2)), axis=axis_sum)
+
+
+def log_pdf(x, pdf_type, pdf_params, axis_sum=None):
+    if pdf_type.lower() == 'gaussian':
+        return log_gaussian(x, mean=pdf_params[0], std=pdf_params[1], axis_sum=axis_sum)
+    elif pdf_type.lower() == 'gaussian_mixture':
+        return log_gaussian_mixture(x, mean1=pdf_params[0], mean2=pdf_params[1],
+                                    std1=pdf_params[2], std2=pdf_params[3],
+                                    prob1=pdf_params[4], axis_sum=axis_sum)
+    else:
+        return ValueError('This function supports only gaussian and gaussian_mixture pdfs.')
+
+
+def lhs_gaussian(shape, ns, mean=0., std=1.):
+    lhd = lhs(int(np.prod(shape)), samples=ns)
+    rv = norm(loc=0., scale=1.).ppf(lhd).reshape(((ns,) + shape))
+    return mean + std * rv
+
+
+def lhs_gaussian_mixture(shape, ns, prob1, mean1=0., std1=1., mean2=0., std2=1.):
+    lhd = lhs(int(np.prod(shape)), samples=ns)
+    rv = norm(loc=0., scale=1.).ppf(lhd).reshape(((ns,) + shape))
+    inds = np.random.binomial(1, prob1, size=(ns,) + shape)
+    means = mean1 * inds + mean2 * (1-inds)
+    stds = std1 * inds + std2 * (1-inds)
+    return means + stds * rv
+
+
+def lhs_pdf(shape, ns, pdf_type, pdf_params):
+    if pdf_type.lower() == 'gaussian':
+        return lhs_gaussian(shape, ns, mean=pdf_params[0], std=pdf_params[1])
+    elif pdf_type.lower() == 'gaussian_mixture':
+        return lhs_gaussian_mixture(shape, ns, mean1=pdf_params[0], mean2=pdf_params[1],
+                                    std1=pdf_params[2], std2=pdf_params[3],
+                                    prob1=pdf_params[4])
+    else:
+        return ValueError('This function supports only gaussian and gaussian_mixture pdfs.')
+
+
+def batch(iterable, n):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+
 # Random utils functions
 
 
-def preprocess_prior(prior, n_layers=None):
-    if not isinstance(prior, dict):
-        raise ValueError('The prior should be given as a dictionary.')
-    if 'type' not in prior.keys():
-        raise ValueError('The prior dictionary should contain a "type" key.')
-    if prior['type'].lower() not in ['gaussian', 'gaussian_mixture']:
+def preprocess_prior(prior_type, prior_params, n_layers):
+    # preprocess the prior inputs
+    if prior_type.lower() not in ['gaussian', 'gaussian_mixture']:
         raise ValueError('The prior type should be "gaussian" or "gaussian_mixture".')
-    if prior['type'].lower() == 'gaussian':
-        if 'variance' not in prior.keys():
-            raise ValueError('For a gaussian prior, the variance should be provided.')
-        if not isinstance(prior['variance'], list):
-            prior['variance'] = [prior['variance']]*n_layers
-        prior['variance'] = [float(v) for v in prior['variance']]
-    if prior['type'].lower() == 'gaussian_mixture':
-        if ('variance_1' not in prior.keys()) or ('variance_2' not in prior.keys()) or ('proba_1' not in prior.keys()):
-            raise ValueError('For a gaussian_mixture prior, variance_1, variance_2, proba_1 should be provided.')
-        for key in ['variance_1', 'variance_2', 'proba_1']:
-            if not isinstance(prior[key], list):
-                prior[key] = [prior[key]]*n_layers
-        for key in ['variance_1', 'variance_2', 'proba_1']:
-            prior[key] = [float(v) for v in prior['key']]
-    return prior
+    if not isinstance(prior_params, tuple) and (not isinstance(prior_params, list)):
+        raise ValueError('Input prior_params should be a tuple or list of tuples.')
+    if isinstance(prior_params, list):
+        if len(prior_params) != n_layers:
+            raise ValueError
+        if any([not isinstance(params, tuple) for params in prior_params]):
+            raise TypeError
+    if prior_type.lower() == 'gaussian':
+        if isinstance(prior_params, tuple):
+            prior_params = [(float(prior_params[0]), float(prior_params[1]))] * n_layers
+        elif isinstance(prior_params, list):
+            prior_params = [(float(params[0]), float(params[1])) for params in prior_params]
+        else:
+            raise TypeError
+    if prior_type.lower() == 'gaussian_mixture':
+        if isinstance(prior_params, tuple):
+            prior_params = [(float(prior_params[0]), float(prior_params[1]), float(prior_params[2]),
+                             float(prior_params[3]), float(prior_params[4]))] * n_layers
+        elif isinstance(prior_params, list):
+            prior_params = [(float(params[0]), float(params[1]), float(params[2]), float(params[3]), float(params[4]))
+                            for params in prior_params]
+        else:
+            raise TypeError
+    return prior_params
 
 
-def compute_weights_shapes(input_dim, units_per_layer, output_dim):
+def compute_weights_shapes(hidden_units, input_dim, output_dim):
     # compute shape of kernels and biases
-    all_units = units_per_layer + (output_dim, )
+    all_units = hidden_units + (output_dim, )
     kernel_shapes = [(input_dim, all_units[0])]
     for j, units in enumerate(all_units[:-1]):
-        kernel_shapes.append((units, all_units[j+1]))
-    bias_shapes = [(units, ) for units in all_units]
+        kernel_shapes.append((units, all_units[j + 1]))
+    bias_shapes = [(units,) for units in all_units]
     return kernel_shapes, bias_shapes
 
 
@@ -49,6 +122,47 @@ def compute_glorot_normal_variance(kernel_shapes):
     # Glorot Normal variance = 2/(fan_in+fan_out)
     variances = [2 / (shape_kernel[0] + shape_kernel[1]) for shape_kernel in kernel_shapes]
     return variances
+
+
+def mean_and_std_from_samples(y_MC, var_aleatoric=0., importance_weights=None):
+    y_mean = np.average(y_MC, axis=0, weights=importance_weights)
+
+    ndata = y_MC.shape[1]
+    if isinstance(var_aleatoric, int) or isinstance(var_aleatoric, float):
+        aleatoric_noise = np.tile(np.array(var_aleatoric).reshape((1, 1)), [ndata, 1])
+    elif isinstance(var_aleatoric, np.ndarray):
+        aleatoric_noise = np.tile(np.diag(var_aleatoric).reshape((1, -1)), [ndata, 1])
+    else:
+        raise TypeError('Input var_aleatoric should be a float, int or ndarray.')
+    epistemic_noise = np.average((y_MC-np.tile(np.expand_dims(y_mean, 0), [y_MC.shape[0], 1, 1])) ** 2,
+                                 axis=0, weights=importance_weights)
+    y_std = np.sqrt(aleatoric_noise + epistemic_noise)
+    return y_mean, y_std
+
+
+def return_outputs(y_mean, y_std, y_MC, return_mean, return_std, return_MC):
+    outputs = []
+    if return_mean:
+        outputs.append(y_mean)
+    if return_std:
+        outputs.append(y_std)
+    if return_MC:
+        outputs.append(y_MC)
+    if len(outputs) == 1:
+        return outputs[0]
+    return tuple(outputs)
+
+
+def std_from_samples(ndata, y_MC=None, var_aleatoric=None, importance_weights=None):
+    aleatoric_noise, epistemic_noise = 0., 0.
+    if var_aleatoric is not None:
+        if isinstance(var_aleatoric, int) or isinstance(var_aleatoric, float):
+            aleatoric_noise = np.tile(np.array(var_aleatoric).reshape((1, 1)), [ndata, 1])
+        if isinstance(var_aleatoric, np.ndarray):
+            aleatoric_noise = np.tile(np.diag(var_aleatoric).reshape((1, -1)), [ndata, 1])
+    if y_MC is not None:
+        epistemic_noise = np.var(y_MC, axis=0)
+    return np.sqrt(aleatoric_noise + epistemic_noise)
 
 
 def sample_weights_for_one_layer(kernel_shape, bias_shape, prior_layer, ns=1):
@@ -97,56 +211,20 @@ def sample_weights_for_all_layers(kernel_shapes, bias_shapes, prior, ns=1, as_ve
     return new_kernels, new_biases
 
 
-def weights_from_layers_to_vector(nn, ind_layers, prior=None):
-    weight_vector = []
-    log_prior_proba = 0
-    for i, l in enumerate(ind_layers):
-        weights = nn.layers[l].get_weights()
-        kernel, bias = weights[0].reshape((-1,)), weights[1].reshape((-1,))
-        weight_vector.append(list(kernel))
-        weight_vector.append(list(bias))
-        if prior is not None and prior['type'].lower() == 'gaussian':
-            log_prior_proba -= np.sum(kernel ** 2, axis=None) / (2 * prior['variance'][i])
-            log_prior_proba -= np.sum(bias ** 2, axis=None) / (2 * prior['variance'][i])
-    return np.array(weight_vector), log_prior_proba
+def weights_from_layers_to_vector(weights):
+    weights = np.vstack([w.reshape((-1,)) for w in weights])
+    return weights
 
 
-def weights_from_vector_to_layers(weight_vector, nn, ind_layers, kernel_shapes, bias_shapes, prior=None):
-    c_ = 0
-    log_prior_proba = 0
-    for i, l in enumerate(ind_layers):
-        kernel = weight_vector[c_:c_+np.prod(kernel_shapes[i])].reshape(kernel_shapes[i])
-        c_ += np.prod(kernel_shapes[i])
-        bias = weight_vector[c_:c_+np.prod(bias_shapes[i])].reshape(bias_shapes[i])
-        c_ += np.prod(bias_shapes[i])
-        nn.layers[l].set_weights([kernel, bias])
-        if prior is not None and prior['type'].lower() == 'gaussian':
-            log_prior_proba -= np.sum(kernel ** 2, axis=None) / (2 * prior['variance'][i])
-            log_prior_proba -= np.sum(bias ** 2, axis=None) / (2 * prior['variance'][i])
-    return log_prior_proba
-
-
-# Probability distributions
-
-def log_gaussian(x, mu, std, axis_sum=None):
-    log2pi = np.log(2 * np.pi).astype(np.float32)
-    return tf.reduce_sum(- 0.5 * log2pi - tf.log(std) - 0.5 * tf.square(tf.divide(tf.subtract(x, mu), std)),
-                         axis=axis_sum)
-
-
-def log_gaussian_mixture(x, mu1, mu2, std1, std2, pi1, axis_sum=None):
-    sqrt2pi = np.sqrt(2 * np.pi).astype(np.float32)
-    term1 = tf.multiply(pi1,
-                        tf.multiply(1./(sqrt2pi * std1),
-                                    tf.exp(-0.5 * tf.square(tf.divide(tf.subtract(x, mu1), std1)))
-                                    )
-                        )
-    term2 = tf.multiply(1. - pi1,
-                        tf.multiply(1. / (sqrt2pi * std2),
-                                    tf.exp(-0.5 * tf.square(tf.divide(tf.subtract(x, mu2), std2)))
-                                    )
-                        )
-    return tf.reduce_sum(tf.log(tf.add(term1, term2)), axis=axis_sum)
+def weights_from_vector_to_layers(weight_vector, kernel_shapes, bias_shapes):
+    weights = []
+    position = 0
+    for l in range(len(kernel_shapes)):
+        weights.append(weight_vector[position:position + np.prod(kernel_shapes[l])].reshape(kernel_shapes[l]))
+        position += np.prod(kernel_shapes[l])
+        weights.append(weight_vector[position:position + np.prod(bias_shapes[l])].reshape(bias_shapes[l]))
+        position += np.prod(kernel_shapes[l])
+    return weights
 
 
 # Functions for alpha black box
@@ -159,38 +237,39 @@ def factor_params_gaussian(var_prior, mu_post, var_post, ndata):
 
 # Plot functions
 
-def plot_mean_2sigma(x, y_mean, y_std, ax, var_n=None,
-                     color_mean='black', color_std='gray', alpha_std=.3):
+def plot_mean_std(x, y_std, ax, y_mean=None, var_aleatoric=None,
+                     color_mean='black', linestyle_mean='-.', color_std='gray', alpha_std=.3,
+                     label_mean='mean prediction', label_std='aleatoric + epistemic',
+                     label_var_n='epistemic_uncertainty'):
+    assert (len(x.shape) == 1 or (len(x.shape) == 2 and x.shape[1] == 1))
+    assert (len(y_std.shape) == 1 or (len(y_std.shape) == 2 and y_std.shape[1] == 1))
 
-    assert len(x.shape) == 1
-    assert len(y_mean.shape) == 1
-    assert len(y_std.shape) == 1
-
-    ax.plot(x, y_mean, color=color_mean, label='mean prediction')
-    if var_n is not None:
+    if y_mean is not None:
+        ax.plot(x, y_mean, color=color_mean, linestyle=linestyle_mean, label=label_mean)
+    if var_aleatoric is not None:
         # plot mean +/- 2 std. dev. of the noise term only, in darker shade
         ax.fill(np.concatenate([x, x[::-1]]),
-                np.concatenate([y_mean - 2. * np.sqrt(var_n), (y_mean + 2. * np.sqrt(var_n))[::-1]]),
-                alpha=alpha_std * 2, fc=color_std, ec='None', label='aleatoric uncertainty')
+                np.concatenate([y_mean - 2. * np.sqrt(var_aleatoric), (y_mean + 2. * np.sqrt(var_aleatoric))[::-1]]),
+                alpha=alpha_std * 2.5, fc=color_std, ec='None', label=label_var_n)
     # plot mean +/- 2 std. dev.
     ax.fill(np.concatenate([x, x[::-1]]),
             np.concatenate([y_mean - 2. * y_std, (y_mean + 2. * y_std)[::-1]]),
-            alpha=alpha_std, fc=color_std, ec='None', label='aleatoric + epistemic')
+            alpha=alpha_std, fc=color_std, ec='None', label=label_std)
 
 
-def plot_mean_MC(x, y_mean, y_MC, ax,
-                 color_mean='black', color_MC='gray', alpha_std=.2):
+def plot_mean_MC(x, y_MC, ax, y_mean=None, color_mean='black', linestyle_mean='-.', color_MC='gray', alpha_MC=.4,
+                 label_mean='mean prediction', label_MC='epistemic uncertainty'):
 
-    assert len(x.shape) == 1
-    assert len(y_mean.shape) == 1
-    assert len(y_MC.shape) == 2
+    assert (len(x.shape) == 1 or (len(x.shape) == 2 and x.shape[1] == 1))
+    assert (len(y_MC.shape) == 2 or (len(y_MC.shape) == 3) and y_MC.shape[-1] == 1)
 
-    ax.plot(x, y_mean, color=color_mean, label='mean prediction')
-    for j in range(y_MC.shape[-1]):
+    if y_mean is not None:
+        ax.plot(x, y_mean, color=color_mean, label=label_mean, linestyle=linestyle_mean)
+    for j in range(y_MC.shape[0]):
         if j == 0:
-            ax.plot(x, y_MC[:, j], color=color_MC, alpha=alpha_std, label='aleatoric + epistemic')
+            ax.plot(x, y_MC[j], color=color_MC, alpha=alpha_MC, label=label_MC)
         else:
-            ax.plot(x, y_MC[:, j], color=color_MC, alpha=alpha_std)
+            ax.plot(x, y_MC[j], color=color_MC, alpha=alpha_MC)
 
 
 
