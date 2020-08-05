@@ -1,9 +1,8 @@
 # Audrey Olivier
 # 4/16/2019
 
-# This code provides algorithms to estimate uncertainties within neural networks for 1D regression
-# (meaning the output is 1-dimensional). The aleatoric noise is assumed to be homoscedastic and known, see input
-# var_n to all classes.
+# This code provides algorithms to estimate uncertainties within neural networks for regression problems
+# The aleatoric noise is assumed to be homoscedastic and known, see input var_n to all classes.
 
 from .general_utils import *
 
@@ -124,6 +123,7 @@ class Regressor:
         Sample from the aleatoric noise
 
         :param size: size must be an integer or a tuple
+
         :return: ndarray of size (size[0], size[1], ..., ny)
         """
         if isinstance(self.var_n, float):
@@ -132,6 +132,12 @@ class Regressor:
             return np.random.multivariate_normal(mean=np.zeros((self.output_dim, )), cov=self.var_n, size=size)
 
     def generate_seed_layers(self, nfigures=4, previous_seeds=()):
+        """
+        Generate seeds for random sampling, one per network layer
+        :param nfigures:
+        :param previous_seeds:
+        :return:
+        """
         random_seeds = []
         for i in range(2 * self.n_uq_layers):
             new_seed = generate_seed(nfigures=nfigures, previous_seeds=random_seeds + list(previous_seeds))
@@ -170,13 +176,11 @@ class Regressor:
         """
         Computes log(p(w)) for NN weights w.
 
-        :param network_weights: list (length 2*n_layers) of ndarrays
+        :param network_weights: list (length 2 * n_layers) of ndarrays of shape (ns, ) + w_shape
         :param sum_over_ns: if True, sum prior over ns independent draws, otherwise return a value for all ns weights.
 
         :return log(p(w))
         """
-        #if self.learn_prior:
-        #    raise ValueError
         log_q = 0.
         # Loop over all layer kernels/biases
         for layer, (w, w_shape, mean, std) in enumerate(zip(
@@ -275,6 +279,8 @@ class VIRegressor(Regressor):
 
     **Inputs:**
 
+    See Regressor
+
     :param weights_to_track: number of weights for which convergence can be visualized at the end of training.
                              None or a list (length 2 * n_uq_layers) of ints
     """
@@ -346,69 +352,6 @@ class VIRegressor(Regressor):
         self.tf_prior_rho = [tf.Variable(self._rho(10.), trainable=True, dtype=tf.float32)
                              for _ in range(2 * self.n_uq_layers - 1)]
         self.prior_stds = [self._sigma(rho) for rho in self.tf_prior_rho] + [tf.constant(1.), ]
-
-    def new_log_prior_pdf(self, network_weights, sum_over_ns=True):
-        """
-        Computes log(p(w)) for NN weights w.
-
-        :param network_weights: weights w of the neural network, list (length 2*n_layers) of ndarrays
-        :param sum_over_ns: if True, sum prior over ns independent draws, otherwise return a value for all ns weights.
-
-        :return log p(w)
-        """
-        log_q = 0
-        if not self.learn_prior:
-            # Loop over all layer kernels/biases
-            for layer, (w, w_shape, mean, std) in enumerate(zip(
-                    network_weights, self.weights_shape, self.prior_means, self.prior_stds)):
-                # compute the log_pdf for this layer kernel/bias and add it
-                mean = tf.tile(tf.reshape(mean, (tf.size(mean),) + (1,) * len(w_shape)), (1,) + w_shape)
-                std = tf.tile(tf.reshape(std, (tf.size(std),) + (1,) * len(w_shape)), (1,) + w_shape)
-
-                log_q += log_gaussian(
-                    x=w, mean=mean, std=std, axis_sum=(None if sum_over_ns else list(range(1, 1 + len(w_shape)))),
-                    )
-            return log_q
-
-        # case where the prior is being learnt
-        log_q = 0
-        for layer, (w, w_shape, mean, rho) in enumerate(zip(
-                network_weights[:-1], self.weights_shape[:-1], self.prior_means, self.prior_stds)):
-            # compute the log_pdf for this layer kernel/bias and add it
-            mean = tf.tile(tf.reshape(mean, (tf.size(mean),) + (1,) * len(w_shape)), (1,) + w_shape)
-            std = tf.tile(tf.reshape(self._sigma(rho), (tf.size(rho),) + (1,) * len(w_shape)), (1,) + w_shape)
-
-            log_q += log_gaussian(
-                x=w, mean=mean, std=std, axis_sum=(None if sum_over_ns else list(range(1, 1 + len(w_shape)))),
-                )
-        # last bias, not being learnt
-        log_q += log_gaussian(
-            x=network_weights[-1], mean=0., std=1., axis_sum=(None if sum_over_ns else -1),
-            )
-        return log_q
-
-    def new_sample_weights_from_prior(self, ns, random_seed=None):
-        """
-        Samples weights for the NN from the prior.
-
-        :return weights w (kernels, biases) sampled from the prior p(w), as a list of length 2 * n_layers
-        """
-        weights = []
-        if not self.learn_prior:
-            for i, (w_shape, mean, std) in enumerate(zip(self.weights_shape, self.prior_means, self.prior_stds)):
-                w = mean + std * tf.random_normal(shape=((ns, ) + w_shape), mean=0., stddev=1.,
-                                                  seed=(None if random_seed is None else random_seed[i]))
-                weights.append(w)
-            return weights
-
-        # Case where prior is being learnt
-        for i, (w_shape, mean, rho) in enumerate(zip(self.weights_shape, self.tf_prior_mu, self.tf_prior_rho)):
-            mean = tf.tile(tf.reshape(mean, (ns,) + (1,) * len(w_shape)), (1,) + w_shape)
-            std = tf.tile(tf.reshape(self._sigma(rho), (ns,) + (1,) * len(w_shape)), (1,) + w_shape)
-            w = mean + std * tf.random_normal(
-                shape=((ns,) + w_shape), mean=0., stddev=1., seed=(None if random_seed is None else random_seed[i]))
-            weights.append(w)
-        return weights
 
     def sample_weights_from_variational(self, ns, random_seed=None, evaluate_log_pdf=False, sum_over_ns=False):
         """
@@ -747,163 +690,6 @@ class BayesByBackprop(VIRegressor):
             self.grad_step = self.opt.apply_gradients(grads_and_vars)
 
 
-class BayesByBackpropLowDim(VIRegressor):
-    """
-    BayesByBackprop algorithm, from 'Weight Uncertainty in Neural Networks', Blundell et al., 2015.
-
-    **Inputs:**
-
-    :param tf_optimizer: optimizer, defaults to Adam optimizer
-    """
-
-    def __init__(self, mask_weights, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu,
-                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
-                 random_seed=None, ):
-
-        # Initial checks and computations for the network
-        super().__init__(hidden_units=hidden_units, input_dim=input_dim, output_dim=output_dim, var_n=var_n,
-                         activation=activation, prior_means=prior_means, prior_stds=prior_stds,
-                         random_seed=random_seed, weights_to_track=weights_to_track)
-        if self.learn_prior:
-            raise NotImplementedError
-        self.mask_weights = mask_weights
-        if int(sum(self.mask_weights[-1])) != self.output_dim:
-            raise ValueError('All of final biases should be included in mask')
-        dmask = int(np.sum([np.sum(m, axis=None) for m in self.mask_weights]))
-        dtot = dmask + 2 * self.n_uq_layers - 1
-        positions = []
-        for m in self.mask_weights:
-            positions.append([mi for mi in np.argwhere(np.reshape(m, (-1,))).reshape((-1,))])
-        self.positions = positions
-        print(self.positions)
-
-        # Update the graph to compute the cost function
-        with self.graph.as_default():
-            # Initialize necessary variables
-            self._initialize_variables_in_graph()
-
-            # Sample weights w from variational distribution q_{theta} and compute log(q_{theta}(w))
-            tf_network_weights, var_post_term = self.sample_weights_from_variational(
-                ns=self.ns_, evaluate_log_pdf=True, sum_over_ns=True)
-
-            # Compute the cost from the prior term -log(p(w))
-            prior_term = self.log_prior_pdf(network_weights=tf_network_weights, sum_over_ns=True)
-
-            # KL divergence KL(q||p)
-            kl_q_p = (var_post_term - prior_term) / tf.to_float(self.ns_)
-
-            # Branch to generate predictions
-            self.predictions = self.compute_predictions(X=self.X_, network_weights=tf_network_weights)
-
-            # Compute contribution of likelihood to cost: -log(p(data|w))
-            neg_likelihood_term = self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]),
-                y_pred=self.predictions, weights_data=self.w_) / tf.to_float(self.ns_)
-
-            # Cost is based on the KL-divergence minimization
-            self.cost = neg_likelihood_term + kl_q_p
-
-            # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
-            self.opt = tf_optimizer(learning_rate=self.lr_)
-            #var_list = [self.tf_variational_mu, self.tf_variational_rho]
-            var_list = [self.tf_small_mu, self.tf_small_rho]
-            print(var_list)
-            grads_and_vars = self.opt.compute_gradients(self.cost, var_list)
-            self.grad_step = self.opt.apply_gradients(grads_and_vars)
-
-    def _initialize_variables_in_graph(self):
-        """
-        Reduce learning to only a few dimensions, the rest are sampled from the same gaussian
-        """
-        standard_sigmas = compute_standard_sigmas(hidden_units=self.hidden_units, input_dim=self.input_dim,
-                                                  output_dim=self.output_dim, scale=1., mode='fan_avg')
-        start_sigmas = []
-        [start_sigmas.extend([std, 0.01]) for std in standard_sigmas]
-        self.tf_variational_mu = []
-        self.tf_variational_rho = []
-        self.tf_variational_sigma = []
-        self.tf_small_mu = []
-        self.tf_small_rho = []
-        for layer, (m, start_std, w_shape, w_dim, pos) in enumerate(
-                zip(self.mask_weights, start_sigmas, self.weights_shape, self.weights_dim, self.positions)):
-            if layer == 2 * self.n_uq_layers - 1:
-                small_mu = tf.Variable(
-                    tf.random_normal(shape=w_shape, mean=0., stddev=start_std), trainable=True, dtype=tf.float32)
-                small_rho = tf.Variable(
-                    -6.9 * tf.ones(shape=w_shape), trainable=True, dtype=tf.float32)
-                self.tf_small_mu.append(small_mu)
-                self.tf_small_rho.append(small_rho)
-                self.tf_variational_mu.append(small_mu)
-                self.tf_variational_rho.append(small_rho)
-                self.tf_variational_sigma.append(self._sigma(small_rho))
-            else:
-                rdm = tf.random_normal(shape=(w_dim,), mean=0., stddev=start_std)
-                all_vars = [tf.Variable(m, trainable=True, dtype=tf.float32) for m in tf.unstack(rdm)]
-                last_var = tf.Variable(tf.reduce_mean(rdm), trainable=True, dtype=tf.float32)
-                tf_mu = tf.where(m, tf.reshape(tf.stack(all_vars, axis=0), w_shape), last_var * tf.ones(shape=w_shape))
-                small_mu = [all_vars[i] for i in pos] + [last_var, ]
-
-                all_vars_ = [tf.Variable(m, trainable=True, dtype=tf.float32) for m
-                             in tf.unstack(-6.9 * tf.ones(shape=(w_dim,)))]
-                last_var_ = tf.Variable(-6.9, trainable=True, dtype=tf.float32)
-                tf_rho = tf.where(m, tf.reshape(tf.stack(all_vars, axis=0), w_shape), last_var * tf.ones(shape=w_shape))
-                small_rho = [all_vars_[i] for i in pos] + [last_var_, ]
-                #small_rho = tf.Variable(
-                #    -6.9 * tf.ones(shape=(np.sum(m) + 1, ), dtype=tf.float32), trainable=True, dtype=tf.float32)
-
-                self.tf_small_mu.append(small_mu)
-                self.tf_small_rho.append(small_rho)
-                self.tf_variational_mu.append(tf_mu)
-                self.tf_variational_rho.append(tf_rho)
-                self.tf_variational_sigma.append(self._sigma(tf_rho))
-
-    def sample_weights_from_variational(self, ns, random_seed=None, evaluate_log_pdf=False, sum_over_ns=False):
-        """
-        Samples weights w for the NN from the variational density q_{theta}(w) (gaussian), includes correlations
-        """
-        log_q = 0.
-        weights = []
-        for i, (tf_mu, tf_sigma, w_shape, w_dim, pos, m) in enumerate(zip(
-                self.tf_variational_mu, self.tf_variational_sigma, self.weights_shape, self.weights_dim,
-                self.positions, self.mask_weights)):
-            #mu, sigma = [tf_mu[-1], ] * w_dim, [tf_sigma[-1], ] * w_dim
-            #mu = tf.where(m, [1, 2, 3, 4], tf_mu[-1])
-            #for j, p in enumerate(pos):
-            #    mu[p] = tf_mu[j]
-            #    sigma[p] = tf_sigma[j]
-            mu = tf.tile(tf.reshape(tf_mu, (1,) + w_shape), [ns, ] + [1, ] * len(w_shape))
-            sigma = tf.tile(tf.reshape(tf_sigma, (1,) + w_shape), [ns, ] + [1, ] * len(w_shape))
-            w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns,) + w_shape, mean=0., stddev=1.)))
-            weights.append(w)
-
-            if evaluate_log_pdf:
-                log_q += log_gaussian(
-                    x=w, mean=mu, std=sigma, axis_sum=(None if sum_over_ns else list(range(-len(w_shape), 0))))
-
-        if evaluate_log_pdf:
-            return weights, log_q
-        return weights
-
-    #def return_marginals(self):
-    #    """ Return the mean and std in all dimensions """
-    #    mu_layers = []
-    #    sigma_layers = []
-    #    for i, (tf_mu, tf_sigma, w_shape, w_dim, pos) in enumerate(zip(
-    #            self.variational_mu, self.variational_sigma, self.weights_shape, self.weights_dim, self.positions)):
-    #        if i == 2 * self.n_uq_layers - 1:
-    #            mu, sigma = [0., ] * w_dim, [1., ] * w_dim
-    #        else:
-    #            mu, sigma = [tf_mu[-1], ] * w_dim, [tf_sigma[-1], ] * w_dim
-    #        for j, p in enumerate(pos):
-    #            mu[p] = tf_mu[j]
-    #            sigma[p] = tf_sigma[j]
-    #        mu_layers.append(np.array(mu).reshape(w_shape))
-    #        sigma_layers.append(np.array(sigma).reshape(w_shape))
-    #    return mu_layers, sigma_layers
-
-
 class alphaBB(VIRegressor):
     """
     alpha-BlackBox algorithm, from 'Black-Box α-Divergence Minimization', Hernández-Lobato, 2016
@@ -911,7 +697,6 @@ class alphaBB(VIRegressor):
     **Inputs:**
 
     :param alpha: alpha value between 0 and 1
-    :param tf_optimizer: optimizer, defaults to Adam optimizer
     """
 
     def __init__(self, alpha, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu,
@@ -1049,62 +834,6 @@ class alphaBB(VIRegressor):
         if module == 'np':
             return mean, np.sqrt(var)
         return mean, tf.sqrt(var)
-
-    def sample_weights_from_variational_loo(self, ns, random_seed=None, ):
-        """
-        Samples weights w for the NN from the LOO variational density q_{theta}(w) (gaussian).
-        :return: weights w, as a list of length 2 * n_uq_layers
-        """
-        ndata = self.training_data[0].shape[0]
-        weights = []
-        for mu, sigma, w_shape, lmda_10, lmda_20 in zip(
-                self.tf_variational_mu, self.tf_variational_sigma, self.weights_shape, self.lmda_1_prior,
-                self.lmda_2_prior):
-            lmda_1_q, lmda_2_q = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma)
-            lmda_1_loo = (ndata - 1) / ndata * (lmda_1_q - lmda_10) + lmda_10
-            lmda_2_loo = (ndata - 1) / ndata * (lmda_2_q - lmda_20) + lmda_20
-            mu, sigma = self._compute_moments_from_sufficient_stats(lmda_1=lmda_1_loo, lmda_2=lmda_2_loo)
-            mu = tf.tile(tf.expand_dims(mu, axis=0), [ns, ] + [1, ] * len(w_shape))
-            sigma = tf.tile(tf.expand_dims(sigma, axis=0), [ns, ] + [1, ] * len(w_shape))
-            w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns, ) + w_shape, mean=0., stddev=1.)))
-            weights.append(w)
-        return weights
-
-    def compute_elpd(self, ns, return_log_pis):
-        """
-        Samples weights w for the NN from the variational density q_{theta}(w) (gaussian).
-        :return: weights w, as a list of length 2 * n_uq_layers
-        """
-        from scipy.special import logsumexp
-        X_train, y_train = self.training_data
-        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=[0, ])
-        #feed_dict = dict(zip(self.tf_variational_mu, self.variational_mu))
-        #feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
-        feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
-        # Set the random seed
-        random_seed = None
-        if self.random_seed is not None:
-            random_seed = self.generate_seed_layers()
-        # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-            #sampled_weights = sess.run(
-            #    self.sample_weights_from_variational_loo(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
-            sampled_weights = sess.run(
-                self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
-            all_loglike = -1. * sess.run(
-                self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_train.astype(np.float32), 0), [ns, 1, 1]),
-                                  y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                  do_sum=False, weights_data=None),
-                feed_dict={self.X_: X_train, self.ns_: ns})
-        logpi_ = np.log(1. / ns) + logsumexp(all_loglike, axis=0)    # sum over ns (ie take expectation)
-        elpd = np.sum(logpi_)   # sum over all data points
-        se = np.sqrt(np.sum((logpi_ - elpd / X_train.shape[0]) ** 2))
-        if return_log_pis:
-            return elpd, se, logpi_
-        return elpd, se
 
     def return_site_approximations(self):
         """ Return the site approximations f_{i}(w) for all training data i, here all the same """
@@ -1947,546 +1676,6 @@ class alphaBBLowRank(VIRegressor):
         return mean, std
 
 
-########################################################################################################################
-#                                              alphaBB with several f(w)                                               #
-########################################################################################################################
-
-class alphaBB_v2(VIRegressor):
-    """
-    alpha-BlackBox algorithm, from 'Black-Box α-Divergence Minimization', Hernández-Lobato, 2016
-
-    **Inputs:**
-
-    :param alpha: alpha value between 0 and 1
-    :param tf_optimizer: optimizer, defaults to Adam optimizer
-    """
-
-    def __init__(self, alpha, nfactors, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu,
-                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
-                 tie_factors='all', random_seed=None):
-
-        # Do the initial checks and computations for the network
-        super().__init__(hidden_units=hidden_units, input_dim=input_dim, output_dim=output_dim, var_n=var_n,
-                         activation=activation, prior_means=prior_means, prior_stds=prior_stds,
-                         weights_to_track=weights_to_track, random_seed=random_seed)
-        if self.learn_prior:
-            raise NotImplementedError
-
-        # check alpha value
-        self.alpha = alpha
-        if self.alpha <= 0. or self.alpha >= 1.:
-            raise ValueError('Input alpha must be between 0 and 1')
-        self.nfactors = nfactors
-        self.tie_factors = tie_factors
-        if self.tie_factors == 'all':
-            self.tie_factors = [list(range(self.nfactors)), ]
-        elif self.tie_factors == 'none':
-            self.tie_factors = [[i, ] for i in range(self.nfactors)]
-
-        self.lmda_1_prior, self.lmda_2_prior = [], []
-        for prior_mean, prior_std in zip(self.prior_means, self.prior_stds):
-            lmda_1, lmda_2 = self._compute_sufficient_stats_from_moments(mean=prior_mean, sigma=prior_std, module='np')
-            self.lmda_1_prior.append(lmda_1)
-            self.lmda_2_prior.append(lmda_2)
-
-        # Update the graph to compute the cost
-        with self.graph.as_default():
-            # Initialize necessary variables
-            self._initialize_variables_in_graph()
-
-            # Branch to sample weights from variational distribution
-            tf_network_weights = self.sample_weights_from_variational(ns=self.ns_, evaluate_log_pdf=False)
-
-            # Branch to generate predictions
-            predictions = self.compute_predictions(X=self.X_, network_weights=tf_network_weights)
-
-            normalization_term = 0.  # contribution of normalization terms to cost: -log(Z(prior))-log(Z(q))
-            log_factors = [0. for _ in range(self.nfactors)]  # log of the site approximations fn
-
-            self.lmda_1_n = []
-            self.lmda_2_n = []
-            self.weights = []
-            # Cost is based on the alpha-divergence minimization
-            for weights, w_shape, mu, sigma, lmda1_0, lmda2_0 in zip(
-                    tf_network_weights, self.weights_shape, self.tf_variational_mu, self.tf_variational_sigma,
-                    self.lmda_1_prior, self.lmda_2_prior):
-                # compute normalization term: log(Z(prior)) is a constant, leave it alone
-                # compute normalization term: -log(Z(q))=0.25 lmda1**2 / lmda2 + 0.5 log(-2 lmda2)
-                lmda_1_n, lmda_2_n = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma)
-                lmda_1_q = lmda1_0 + tf.reduce_sum(tf.stack(
-                    [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_1_n, axis=0))],
-                    axis=0), axis=0)
-                lmda_2_q = lmda2_0 + tf.reduce_sum(tf.stack(
-                    [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_2_n, axis=0))],
-                    axis=0), axis=0)
-
-                #self._compute_params_from_variables(
-                #    mu_var=mu, sigma_var=sigma, lmda1_0=lmda1_0, lmda2_0=lmda2_0, which='variational')
-                normalization_term += tf.reduce_sum(0.25 * lmda_1_q ** 2 / lmda_2_q + 0.5 * tf.log(-2. * lmda_2_q))
-
-                # compute the factor parameters lambda_f, then the log of the site approximations
-                # lmda_q,0 is (mu/sig**2, -1/(2sig**2)), also use lmda=(lmda_q-lmda_0)/ndata
-                # then f=exp(lmda_1*w + lmda_2*w**2)
-                lw = len(w_shape)
-                for lmda1, lmda2, list_pos in zip(
-                        tf.unstack(lmda_1_n, axis=0), tf.unstack(lmda_2_n, axis=0), self.tie_factors):
-                    temp_log_factor = tf.reduce_sum(
-                        tf.add(tf.multiply(tf.tile(tf.expand_dims(lmda1, 0), [self.ns_, ] + [1, ] * lw), weights),
-                               tf.multiply(tf.tile(tf.expand_dims(lmda2, 0), [self.ns_, ] + [1, ] * lw),
-                                           tf.square(weights))),
-                        axis=list(range(-lw, 0)))
-                    #temp_log_factor = tf.reduce_sum(
-                    #    tf.multiply(tf.tile(tf.expand_dims(lmda2, 0), [self.ns_, ] + [1, ] * lw),
-                    #                tf.square(weights)),
-                    #    axis=list(range(-lw, 0)))
-                    for ind in list_pos:
-                        log_factors[ind] += temp_log_factor
-
-            # tie factors: use same site approximation for all data points
-            log_factors = tf.stack(log_factors, axis=-1)
-            assert len(log_factors.get_shape().as_list()) == 2
-            # compute likelihood of all data points n separately
-            loglike = -1 * self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=predictions, do_sum=False)
-            assert len(loglike.get_shape().as_list()) == 2
-            # compute log(E_{q}[(like_n(w)/f(w)) ** alpha]) for all data points n,
-            # expectation is computed by averaging over the ns_ samples
-            logexpectation = tf.add(
-                tf.log(1. / tf.to_float(self.ns_)),
-                tf.reduce_logsumexp(self.alpha * tf.subtract(loglike, log_factors), axis=0))
-            # cste_over_ns = tf.reduce_max(self.alpha * (loglike - log_factors), axis=0)
-            # in_exp = self.alpha * (loglike - log_factors) - tf.tile(tf.expand_dims(cste_over_ns, 0), [self.ns_, 1])
-            # logexpectation = cste_over_ns - tf.log(tf.to_float(self.ns_)) + tf.reduce_logsumexp(in_exp, axis=0)
-            # in the cost, sum over all the data points n
-            self.log_factors = log_factors
-            self.cost = normalization_term - 1. / self.alpha * tf.reduce_sum(logexpectation)
-
-            # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
-            opt = tf_optimizer(learning_rate=self.lr_)
-            #var_list = [self.tf_variational_mu, self.tf_variational_rho]
-            total_grads_and_vars = opt.compute_gradients(self.cost, self.var_list)
-            total_grads_and_vars = [(tf.where(tf.is_nan(grad), tf.zeros_like(grad), grad), val)
-                                    for grad, val in total_grads_and_vars]
-            self.grad_step = opt.apply_gradients(total_grads_and_vars)
-
-    def _compute_params_from_variables(self, mu_var, sigma_var, lmda1_0, lmda2_0, which, module='tf'):
-        # variational lmdas are sum of variables lambdas
-        # site lmdas are 1/n_in_var * (variable lmda - lmda0/nvariables)
-        lmda1_n, lmda2_n = self._compute_sufficient_stats_from_moments(mean=mu_var, sigma=sigma_var, module=module)
-        if which == 'site':
-            return lmda1_n, lmda2_n
-        if which == 'variational' and module == 'tf':
-            lmda1_out = tf.reduce_sum(lmda1_, axis=0)
-            lmda2_out = tf.reduce_sum(lmda2_, axis=0)
-        elif which == 'site' and module == 'tf':
-            lmda1_out = lmda1_n
-            lmda2_out = lmda2_n
-        elif which == 'variational' and module == 'np':
-            lmda1_out = np.sum(lmda1_, axis=0)
-            lmda2_out = np.sum(lmda2_, axis=0)
-        elif which == 'site' and module == 'np':
-            lmda1_out = [1 / len(factors_i) * (lmda1_i - lmda1_0 / len(self.tie_factors))
-                         for factors_i, lmda1_i in zip(self.tie_factors, lmda1_)]
-            lmda2_out = [1 / len(factors_i) * (lmda2_i - lmda2_0 / len(self.tie_factors))
-                         for factors_i, lmda2_i in zip(self.tie_factors, lmda2_)]
-        else:
-            raise ValueError
-        return lmda1_out, lmda2_out
-
-    def _compute_variables_from_params(self, lmda1, lmda2, lmda1_0, lmda2_0, which='site', module='tf'):
-        # variational lmdas are sum of variables lambdas
-        # site lmdas are 1/n_in_var * (variable lmda - lmda0/nvariables)
-        if which == 'site' and module == 'tf':
-            lmda1_out = tf.stack([len(factors_i) * lmda_i + lmda1_0 / len(self.tie_factors)
-                                  for factors_i, lmda_i in zip(self.tie_factors, tf.unstack(lmda1, axis=0))], axis=0)
-            lmda2_out = tf.stack([len(factors_i) * lmda_i + lmda2_0 / len(self.tie_factors)
-                                  for factors_i, lmda_i in zip(self.tie_factors, tf.unstack(lmda2, axis=0))], axis=0)
-        elif which == 'site' and module == 'np':
-            lmda1_out = np.array([len(factors_i) * lmda_i + lmda1_0 / len(self.tie_factors)
-                                  for factors_i, lmda_i in zip(self.tie_factors, lmda1)])
-            lmda2_out = np.array([len(factors_i) * lmda_i + lmda2_0 / len(self.tie_factors)
-                                  for factors_i, lmda_i in zip(self.tie_factors, lmda2)])
-        else:
-            raise ValueError
-        mu_out, sigma_out = self._compute_moments_from_sufficient_stats(
-            lmda_1=lmda1_out, lmda_2=lmda2_out, module=module)
-        return mu_out, sigma_out
-
-    @staticmethod
-    def _compute_sufficient_stats_from_moments(mean, sigma, module='tf'):
-        """ Compute sufficient statistics of a gaussian from its mean and variance """
-        if module == 'tf':
-            var = tf.square(sigma)
-            lmda_1 = tf.divide(mean, var)
-        elif module == 'np':
-            var = sigma ** 2
-            lmda_1 = mean / var
-        else:
-            raise ValueError
-        lmda_2 = - 1. / (2. * var)
-        return lmda_1, lmda_2
-
-    @staticmethod
-    def _compute_moments_from_sufficient_stats(lmda_1, lmda_2, module='tf'):
-        """ Compute sufficient statistics of a gaussian from its mean and variance """
-        var = -1. / (2. * lmda_2)
-        mean = lmda_1 * var
-        if module == 'np':
-            return mean, np.sqrt(var)
-        return mean, tf.sqrt(var)
-
-    def _initialize_variables_in_graph(self):
-        """
-        Initialize some variables in VI graph
-        """
-        self.tf_tracked_means = []
-        self.tf_tracked_stds = []
-        self.tf_variational_mu = []
-        #self.tf_variational_rho = []
-        self.tf_variational_sigma = []
-        self.var_list = []
-
-        # add dense layers, add contributions of each layer to prior and variational posterior costs
-        standard_sigmas = compute_standard_sigmas(hidden_units=self.hidden_units, input_dim=self.input_dim,
-                                                  output_dim=self.output_dim, scale=1., mode='fan_avg')
-        start_sigmas = []
-        [start_sigmas.extend([std, 0.01]) for std in standard_sigmas]
-        for layer, (start_std, w_shape, w_dim, lmda1_0, lmda2_0) in enumerate(zip(
-                start_sigmas, self.weights_shape, self.weights_dim, self.lmda_1_prior, self.lmda_2_prior)):
-            # Define the parameters of the variational distribution to be trained: theta={mu, rho} for kernel and bias
-            start_rho = self._rho(np.sqrt(self.nfactors) * 1e-3, module='np')
-            #mu = tf.Variable(
-            #    tf.tile(tf.random_normal(shape=(1,) + w_shape, mean=0., stddev=start_std),
-            #            [len(self.tie_factors), ] + [1, ] * len(w_shape)),
-            #    trainable=True, dtype=tf.float32)
-            #mu = tf.Variable(
-            #    start_std * tf.random_normal(shape=(len(self.tie_factors),) + w_shape, dtype=tf.float32), trainable=True,
-            #    dtype=tf.float32)
-            mu = tf.Variable(
-                start_std * tf.random_normal(shape=(1,) + w_shape, dtype=tf.float32),
-                trainable=True,
-                dtype=tf.float32)
-            rho = tf.Variable(
-                start_rho * tf.ones(shape=(len(self.tie_factors),) + w_shape, dtype=tf.float32), trainable=True,
-                dtype=tf.float32)
-            sigma = self._sigma(rho)
-
-            self.tf_variational_mu.append(tf.tile(mu, [len(self.tie_factors),] + [1,] * len(w_shape)))
-            #self.tf_variational_rho.append(rho)
-            self.tf_variational_sigma.append(sigma)
-            self.var_list.extend([mu, rho])
-
-            # Keep track of some of the weights
-            if self.weights_to_track is not None:
-                lmda_1_n, lmda_2_n = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma)
-                lmda_1_q = lmda1_0 + tf.reduce_sum(tf.stack(
-                    [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_1_n, axis=0))],
-                    axis=0), axis=0)
-                lmda_2_q = lmda2_0 + tf.reduce_sum(tf.stack(
-                    [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_2_n, axis=0))],
-                    axis=0), axis=0)
-                tracked_means, tracked_stds = self._compute_moments_from_sufficient_stats(
-                    lmda_1=tf.reshape(lmda_1_q, shape=(w_dim,))[:self.weights_to_track[layer]],
-                    lmda_2=tf.reshape(lmda_2_q, shape=(w_dim,))[:self.weights_to_track[layer]])
-                self.tf_tracked_means.append(tracked_means)
-                self.tf_tracked_stds.append(tracked_stds)
-
-    def sample_weights_from_variational(self, ns, random_seed=None, evaluate_log_pdf=False, sum_over_ns=False):
-        """
-        Samples weights w for the NN from the variational density q_{theta}(w) (gaussian).
-        :return: weights w, as a list of length 2 * n_uq_layers
-        """
-        weights = []
-        log_q = 0.
-        for w_shape, mu, sigma, lmda1_0, lmda2_0 in zip(
-                self.weights_shape, self.tf_variational_mu, self.tf_variational_sigma,
-                self.lmda_1_prior, self.lmda_2_prior):
-            lmda_1_n, lmda_2_n = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma)
-            lmda_1_q = lmda1_0 + tf.reduce_sum(tf.stack(
-                [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_1_n, axis=0))],
-                axis=0), axis=0)
-            lmda_2_q = lmda2_0 + tf.reduce_sum(tf.stack(
-                [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, tf.unstack(lmda_2_n, axis=0))],
-                axis=0), axis=0)
-
-            mu, sigma = self._compute_moments_from_sufficient_stats(lmda_1=lmda_1_q, lmda_2=lmda_2_q)
-            mu = tf.tile(tf.expand_dims(mu, axis=0), [ns, ] + [1, ] * len(w_shape))
-            sigma = tf.tile(tf.expand_dims(sigma, axis=0), [ns, ] + [1, ] * len(w_shape))
-            w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns, ) + w_shape, mean=0., stddev=1.)))
-            weights.append(w)
-            if evaluate_log_pdf:
-                log_q += log_gaussian(
-                    x=w, mean=mu, std=sigma, axis_sum=(None if sum_over_ns else list(range(-len(w_shape), 0))),)
-
-        if evaluate_log_pdf:
-            return weights, log_q
-        return weights
-
-    def sample_weights_from_variational_loo(self, ns):
-        """
-        Samples weights w for the NN from the variational density q_{theta}(w) (gaussian).
-        :return: weights w, as a list of length 2 * n_uq_layers
-        """
-        ndata = self.training_data[0].shape[0]
-        weights = []
-        for mu, sigma, w_shape, prior_mean, prior_std in zip(
-                self.tf_variational_mu, self.tf_variational_sigma, self.weights_shape, self.prior_means,
-                self.prior_stds):
-            lmda_1_n, lmda_2_n = self.compute_sufficient_stats_from_moments(mean=mu, sigma=sigma)
-            lmda_1_p0, lmda_2_p0 = self.compute_sufficient_stats_from_moments(mean=prior_mean, sigma=prior_std)
-            # If factors are tied,
-            if self.tie_factors:
-                lmda_1_loo = tf.to_float(self.nfactors - 1) * lmda_1_n + lmda_1_p0
-                lmda_2_loo = tf.to_float(self.nfactors - 1) * lmda_2_n + lmda_2_p0
-                mu, sigma = self.compute_moments_from_sufficient_stats(lmda_1=lmda_1_loo, lmda_2=lmda_2_loo)
-                mu = tf.tile(tf.expand_dims(mu, axis=0), [ns, ] + [1, ] * len(w_shape))
-                sigma = tf.tile(tf.expand_dims(sigma, axis=0), [ns, ] + [1, ] * len(w_shape))
-                w = tf.add(
-                    mu, tf.multiply(sigma, tf.random_normal(shape=(ns, ) + w_shape, mean=0., stddev=1.)))
-            else:
-                lmda_1_q = tf.reduce_sum(lmda_1_n, axis=0) + lmda_1_p0
-                lmda_2_q = tf.reduce_sum(lmda_2_n, axis=0) + lmda_2_p0
-                lmda_1_loo = tf.tile(tf.expand_dims(lmda_1_q, 0), [ndata, ] + [1, ] * len(w_shape)) - lmda_1_n
-                lmda_2_loo = tf.tile(tf.expand_dims(lmda_2_q, 0), [ndata, ] + [1, ] * len(w_shape)) - lmda_2_n
-                mu, sigma = self.compute_moments_from_sufficient_stats(lmda_1=lmda_1_loo, lmda_2=lmda_2_loo)
-                mu = tf.tile(tf.expand_dims(mu, axis=0), [ns, 1, ] + [1, ] * len(w_shape))
-                sigma = tf.tile(tf.expand_dims(sigma, axis=0), [ns, 1, ] + [1, ] * len(w_shape))
-                w = tf.add(
-                    mu, tf.multiply(sigma, tf.random_normal(shape=(ns, ndata) + w_shape, mean=0., stddev=1.)))
-            weights.append(w)
-        return weights
-
-    def compute_elpd(self, ns, return_se):
-        """
-        Samples weights w for the NN from the variational density q_{theta}(w) (gaussian).
-        :return: weights w, as a list of length 2 * n_uq_layers
-        """
-        from scipy.special import logsumexp
-        X_train, y_train = self.training_data
-        feed_dict = dict(zip(self.tf_variational_mu, self.variational_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
-        # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-            sampled_weights = sess.run(self.sample_weights_from_variational_loo(ns=ns), feed_dict=feed_dict)
-            if self.tie_factors:
-                all_loglike = -1. * sess.run(
-                    self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_train.astype(np.float32), 0), [ns, 1, 1]),
-                                      y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                      do_sum=False, weights_data=None),
-                    feed_dict={self.X_: X_train, self.ns_: ns})
-            else:
-                all_loglike = np.empty(ns, X_train.shape[0])
-                for count_i in range(X_train.shape[0]):
-                    network_weights = [w[:, count_i, ...] for w in sampled_weights]
-                    all_loglike[:, count_i] = -1. * sess.run(
-                        self.neg_log_like(y_true=tf.tile(y_train[np.newaxis, np.newaxis, count_i, :].astype(np.float32),
-                                                         [ns, 1, 1]),
-                                          y_pred=self.compute_predictions(X=self.X_, network_weights=network_weights),
-                                          do_sum=True, axis_sum=-1, weights_data=None),
-                        feed_dict={self.X_: X_train[np.newaxis, count_i, :], self.ns_: ns})
-        logpi_ = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
-        elpd = np.sum(logpi_)
-        if return_se:
-            se = np.sqrt(np.sum((logpi_ - elpd / X_train.shape[0]) ** 2))
-            return elpd, se
-        return elpd
-
-    def fit(self, X, y, weights_data=None, ns=10, epochs=100, verbose=0, lr=0.001):
-        """
-        Fit, i.e., find the variational distribution that minimizes the cost function
-
-        :param X: input data, ndarray of shape (n_data, nx)
-        :param y: output data, ndarray of shape (n_data, ny)
-        :param epochs: int
-        :param ns: nb. of samples used in computing cost (expectation over variational distribution)
-        :param lr: learning rate for optimizer
-        """
-        # Initilize tensorflow session (the same will be used later for ) and required variables
-        self.training_data = (X, y)
-        if self.nfactors != X.shape[0]:
-            raise ValueError
-        if weights_data is None:
-            weights_data = np.ones((X.shape[0], ))
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-
-            # start with a certain variational distribution (all variables are the same)
-            #if start_variational_mu is not None and start_variational_sigma is not None:
-            #    list_var1, list_var2 = [], []
-            #    for mu, sigma, lmda1_0, lmda2_0, w_shape in zip(
-            #            start_variational_mu, start_variational_sigma, self.lmda_1_prior, self.lmda_2_prior,
-            #            self.weights_shape):
-            #        lmda1_q, lmda2_q = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma, module='np')
-            #        lmda1_n, lmda2_n = (lmda1_q - lmda1_0) / X.shape[0], (lmda2_q - lmda2_0) / X.shape[0]
-            #        var1, var2 = self._compute_variables_from_params(
-            #            lmda1=np.tile(lmda1_n[np.newaxis, ...], [len(self.tie_factors), ] + [1, ] * len(w_shape)),
-            #            lmda2=np.tile(lmda2_n[np.newaxis, ...], [len(self.tie_factors), ] + [1, ] * len(w_shape)),
-            #            lmda1_0=lmda1_0, lmda2_0=lmda2_0, which='site', module='np')
-            #        list_var1.append(var1)
-            #        list_var2.append(self._rho(sigma=var2))
-            #    sess.run([tf.assign(tf_var, var) for tf_var, var in zip(self.tf_variational_mu, list_var1)])
-            #    sess.run([tf.assign(tf_var, var) for tf_var, var in zip(self.tf_variational_rho, list_var2)])
-
-            # Run training loop
-            for e in range(epochs):
-                #print(sess.run(self.log_factors,
-                #               feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns}))
-                _, loss_history_ = sess.run(
-                    [self.grad_step, self.cost],
-                    feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns,
-                               self.lr_: np.mean([len(facs) for facs in self.tie_factors]) * lr})
-                self.loss_history.append(loss_history_)
-                # Save some of the weights
-                if self.weights_to_track is not None:
-                    mean, std = sess.run([self.tf_tracked_means, self.tf_tracked_stds], feed_dict={self.ns_: ns})
-                    self.variational_mu_history = [np.concatenate([m1, m2.reshape((1, -1))], axis=0)
-                                                   for m1, m2 in zip(self.variational_mu_history, mean)]
-                    self.variational_sigma_history = [np.concatenate([m1, m2.reshape((1, -1))], axis=0)
-                                                      for m1, m2 in zip(self.variational_sigma_history, std)]
-                # print comments on terminal
-                if verbose:
-                    print('epoch = {}, loss = {}'.format(e, self.loss_history[-1]))
-
-            # Save the final variational parameters
-            self.variational_mu, self.variational_sigma = sess.run(
-                [self.tf_variational_mu, self.tf_variational_sigma], feed_dict={self.ns_: ns})
-        return None
-
-    def predict_uq(self, X, ns, return_std=True, return_MC=10, return_percentiles=(2.5, 97.5),
-                   aleatoric_in_std_perc=True, aleatoric_in_MC=False):
-        """
-        Predict y for new input X, along with uncertainty.
-        """
-        feed_dict = dict(zip(self.tf_variational_mu, self.variational_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
-        feed_dict.update({self.X_: X})
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-            network_weights = sess.run(self.sample_weights_from_variational(ns=ns), feed_dict=feed_dict)
-            y_MC = sess.run(self.compute_predictions(X=self.X_, network_weights=network_weights), feed_dict=feed_dict)
-        outputs = compute_and_return_outputs(
-            y_MC=y_MC, var_aleatoric=self.var_n, return_std=return_std, return_percentiles=return_percentiles,
-            return_MC=return_MC, aleatoric_in_std_perc=aleatoric_in_std_perc, aleatoric_in_MC=aleatoric_in_MC)
-        return outputs
-
-    def return_marginals(self):
-        """ Return the mean and std in all dimensions """
-        feed_dict = dict(zip(self.tf_variational_mu, self.variational_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
-        mean, std = [], []
-        for mu, sigma, lmda1_0, lmda2_0 in zip(
-                self.variational_mu, self.variational_sigma, self.lmda_1_prior, self.lmda_2_prior):
-            lmda_1_n, lmda_2_n = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma, module='np')
-            lmda_1_q = lmda1_0 + np.sum(np.array(
-                [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, lmda_1_n)]),
-                axis=0)
-            lmda_2_q = lmda2_0 + np.sum(np.array(
-                [len(tie_fact) * lmda_n for tie_fact, lmda_n in zip(self.tie_factors, lmda_2_n)]),
-                axis=0)
-            #lmda_1_q, lmda_2_q = self._compute_params_from_variables(
-            #    mu_var=mu, sigma_var=sigma, lmda1_0=lmda1_0, lmda2_0=lmda2_0, which='variational', module='np')
-            mu, sigma = self._compute_moments_from_sufficient_stats(lmda_1=lmda_1_q, lmda_2=lmda_2_q, module='np')
-            mean.append(mu)
-            std.append(sigma)
-        return mean, std
-
-    def return_site_approximations(self):
-        """ Return the site approximations f_{i}(w) for all training data i """
-        #ndata = self.training_data[0].shape[0]
-        #site_approxs_mu, site_approxs_sigma = [], []
-        #for mu, sigma, lmda1_0, lmda2_0 in zip(
-        #        self.variational_mu, self.variational_sigma, self.lmda_1_prior, self.lmda_2_prior):
-            #lmda_1_n, lmda_2_n = self._compute_params_from_variables(
-            #    mu_var=mu, sigma_var=sigma, lmda1_0=lmda1_0, lmda2_0=lmda2_0, which='site', module='np')
-            #mu, sigma = self._compute_moments_from_sufficient_stats(
-            #    lmda_1=np.array(lmda_1_n), lmda_2=np.array(lmda_2_n), module='np')
-            #site_approxs_mu.append(mu)
-            #site_approxs_sigma.append(sigma)
-        #site_approxs_mu = [[mu[i] for mu in site_approxs_mu] for i in range(len(self.tie_factors))]
-        #site_approxs_sigma = [[sig[i] for sig in site_approxs_sigma] for i in range(len(self.tie_factors))]
-        site_approxs_mu = [[mu[i] for mu in self.variational_mu] for i in range(len(self.tie_factors))]
-        site_approxs_sigma = [[sig[i] for sig in self.variational_sigma] for i in range(len(self.tie_factors))]
-        return site_approxs_mu, site_approxs_sigma
-
-    def get_lso_moments(self, leave_factors):
-        # Compute the mean and std of the leave-several-out density
-        ndata = self.training_data[0].shape[0]
-        #keep_factors = list(set(range(ndata)) - set(leave_factors))
-        index_site_leave_factors = [next(i for i in range(len(self.tie_factors)) if fac in self.tie_factors[i])
-                                   for fac in leave_factors]
-        lso_mu, lso_sigma = [], []
-        for mu, sigma, lmda1_0, lmda2_0, w_shape in zip(
-                self.variational_mu, self.variational_sigma, self.lmda_1_prior, self.lmda_2_prior, self.weights_shape):
-            lmda1_lso, lmda2_lso = self._compute_sufficient_stats_from_moments(mean=mu, sigma=sigma, module='np')
-            for i, fact_i in enumerate(self.tie_factors):
-                lmda1_lso[i, ...] = (len(fact_i) - index_site_leave_factors.count(i)) / len(fact_i) * lmda1_lso[i, ...]
-                lmda2_lso[i, ...] = (len(fact_i) - index_site_leave_factors.count(i)) / len(fact_i) * lmda2_lso[i, ...]
-            mu_n, sigma_n = self._compute_moments_from_sufficient_stats(lmda_1=lmda1_lso, lmda_2=lmda2_lso, module='np')
-            lso_mu.append(mu_n)
-            lso_sigma.append(sigma_n)
-        return lso_mu, lso_sigma
-
-    def predict_uq_from_lso(self, X, leave_factors, ns, return_std=True, return_percentiles=(2.5, 97.5),
-                            aleatoric_in_std_perc=True, ):
-        """ Predict from leave-several-out density. For this case which index it is does not matter """
-        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=leave_factors)
-        # Run the graph to predict output and associated uncertainty
-        feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
-        feed_dict.update({self.X_: X})
-        # Set the random seed
-        random_seed = None
-        if self.random_seed is not None:
-            random_seed = self.generate_seed_layers()
-        # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-            network_weights = sess.run(
-                self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
-            y_MC = sess.run(self.compute_predictions(X=self.X_, network_weights=network_weights), feed_dict=feed_dict)
-        # Compute statistical outputs from MC values
-        outputs = compute_and_return_outputs(
-            y_MC=y_MC, var_aleatoric=self.var_n, return_std=return_std, return_percentiles=return_percentiles,
-            return_MC=0, aleatoric_in_std_perc=aleatoric_in_std_perc, aleatoric_in_MC=False)
-        return outputs
-
-    def compute_lso_predictive_density(self, leave_factors, ns=10000):
-        """
-        Compute log predictive density p(y|data) at new data points (X, y)
-
-        :return:
-        """
-        from scipy.special import logsumexp
-        # get data for prediction (left out during training)
-        X_pred = np.array([self.training_data[0][i] for i in leave_factors])
-        y_pred = np.array([self.training_data[1][i] for i in leave_factors])
-        # get lso density
-        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=leave_factors)
-        # Run the graph to predict output and associated uncertainty
-        feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
-        # Set the random seed
-        random_seed = None
-        if self.random_seed is not None:
-            random_seed = self.generate_seed_layers()
-        # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
-            sampled_weights = sess.run(
-                self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
-            # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
-            all_loglike = -1. * sess.run(
-                self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_pred.astype(np.float32), 0), [ns, 1, 1]),
-                                  y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                  do_sum=True, axis_sum=-1, weights_data=None),
-                feed_dict={self.X_: X_pred, self.ns_: ns})
-            value = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
-        return value
-
-
 class BayesByBackpropMixture(VIRegressor):
     """
     BayesByBackprop algorithm, from 'Weight Uncertainty in Neural Networks', Blundell et al., 2015.
@@ -2505,8 +1694,8 @@ class BayesByBackpropMixture(VIRegressor):
         super().__init__(hidden_units=hidden_units, input_dim=input_dim, output_dim=output_dim, var_n=var_n,
                          activation=activation, prior_means=prior_means, prior_stds=prior_stds,
                          weights_to_track=weights_to_track, random_seed=None)
-        #if self.learn_prior:
-        #    raise NotImplementedError
+        # if self.learn_prior:
+        #     raise NotImplementedError
         self.ncomp = ncomp
         self.lower_bound = lower_bound
 
@@ -2539,14 +1728,14 @@ class BayesByBackpropMixture(VIRegressor):
                 for k in range(self.ncomp):
                     log_zks = log_gaussian(x=tf_m, mean=tf_m[k, :], std=tf.sqrt(tf_std ** 2 + tf_std[k, :] ** 2),
                                            axis_sum=-1)
-                    #log_zks = []
-                    #for j in range(self.ncomp):
-                    #    log_z_kj = 0
-                    #    for m, std in zip(self.tf_variational_mu, self.tf_variational_sigma):
-                    #        log_z_kj += log_gaussian(
-                    #            x=m[j, ...], mean=m[k, ...], std=tf.sqrt(std[j, ...] ** 2 + std[k, ...] ** 2))
-                    #    log_zks.append(log_z_kj)
-                    #log_zks = tf.stack(log_zks)
+                    # log_zks = []
+                    # for j in range(self.ncomp):
+                    #     log_z_kj = 0
+                    #     for m, std in zip(self.tf_variational_mu, self.tf_variational_sigma):
+                    #         log_z_kj += log_gaussian(
+                    #             x=m[j, ...], mean=m[k, ...], std=tf.sqrt(std[j, ...] ** 2 + std[k, ...] ** 2))
+                    #     log_zks.append(log_z_kj)
+                    # log_zks = tf.stack(log_zks)
                     var_post_term += tf.reduce_logsumexp(tf.log(1. / self.ncomp) + log_zks)
                 var_post_term /= self.ncomp
 
@@ -2729,9 +1918,12 @@ class BayesByBackpropMixture(VIRegressor):
 
 
 class ModelAveraging:
-    def __init__(self, nn_dict, training_data):
+    def __init__(self, nn_dict, training_data, n_bootstrap=None):
         self.nn = nn_dict
         self.training_data = training_data
+        if n_bootstrap is not None:
+            self.n_bootstrap = n_bootstrap
+            self.deltas_bb = [np.random.dirichlet([1.] * self.training_data[0].shape[0]) for _ in range(n_bootstrap)]
 
         self.alpha_list = []
         self.random_seed_list = []
@@ -2739,15 +1931,39 @@ class ModelAveraging:
         self.regressors = []
         self.all_lpd = []
         self.elpd = []
-        self.error_elpd = []
-        self.weights_elpd = []
-        self.weights_modified_elpd = []
+        self.modified_elpd = []
+        self.elpd_bb_sample = []
 
-    def compute_weights(self):
+        self.weights_elpd = None
+        self.weights_modified_elpd = None
+        self.weights_elpd_bb = None
+
+    def _compute_elpd_and_modifs(self, loo_logpd):
+        """
+        Compute various versions of the model weights
+        :param all_logpd:
+        :return: weights from elpd, modified version (with standard error) and BB
+        """
+        elpd = np.sum(loo_logpd)
+        # Modified version with standard error
+        error_elpd = np.sqrt(np.sum((loo_logpd - np.mean(loo_logpd)) ** 2))
+        modified_elpd = elpd - 0.5 * error_elpd
+        # Bayesian bootstrap version
+        elpd_bb_sample = np.empty((self.n_bootstrap, ))
+        for b, delta in enumerate(self.deltas_bb):
+            assert delta.shape == loo_logpd.shape
+            elpd_bb_sample[b] = len(loo_logpd) * np.sum(delta * loo_logpd)
+        return elpd, modified_elpd, elpd_bb_sample
+
+    def _compute_weights(self):
         from scipy.special import logsumexp
-        self.weights_elpd = np.exp(self.elpd - logsumexp(self.elpd))
-        modified_elpd = np.array([log_w - 0.5 * se_k for log_w, se_k in zip(self.elpd, self.error_elpd)])
-        self.weights_modified_elpd = np.exp(modified_elpd - logsumexp(modified_elpd))
+        self.weights_elpd = np.exp(np.array(self.elpd) - logsumexp(self.elpd))
+        self.weights_modified_elpd = np.exp(np.array(self.modified_elpd) - logsumexp(self.modified_elpd))
+        elpd_bb_sample_list = np.array(self.elpd_bb_sample)
+        assert(elpd_bb_sample_list.shape[1] == self.n_bootstrap)
+        weights_bb_sample = np.exp(
+            elpd_bb_sample_list - np.tile(logsumexp(elpd_bb_sample_list, axis=0), [len(self.elpd), 1]))
+        self.weights_elpd_bb = np.mean(weights_bb_sample, axis=1)
 
     def predict_uq(self, X, ns, return_std=True, return_percentiles=(2.5, 97.5),
                    aleatoric_in_std_perc=True, aleatoric_in_MC=False, weights_attribute='weights_modified_elpd'):
@@ -2806,10 +2022,13 @@ class ModelAveragingLOO(ModelAveraging):
         self.random_seed_list.append(random_seed)
         self.regressors.append(reg)
         self.all_lpd.append(np.array(log_pis))
-        self.elpd.append(np.sum(log_pis))
-        self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
+        elpd, modified_elpd, elpd_bb_sample = self._compute_elpd_and_modifs(loo_logpd=np.array(log_pis))
+        self.elpd.append(elpd)
+        self.modified_elpd.append(modified_elpd)
+        self.elpd_bb_sample.append(elpd_bb_sample)
+        # self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
 
-        self.compute_weights()
+        self._compute_weights()
 
 
 class ModelAveragingLOOalphaBB(ModelAveraging):
@@ -2836,10 +2055,16 @@ class ModelAveragingLOOalphaBB(ModelAveraging):
         self.alpha_list.append(alpha)
         self.random_seed_list.append(random_seed)
         self.regressors.append(reg)
-        self.all_lpd.append(np.array(log_pis))
-        self.elpd.append(np.sum(log_pis))
-        self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
-        #self.elpd.append(elpd)
-        #self.error_elpd.append(se)
+        self.all_lpd.append(np.array(log_pis)) # should be a matrix
+        # self.elpd.append(np.sum(log_pis))
+        # self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
+        # self.elpd.append(elpd)
+        # self.error_elpd.append(se)
 
-        self.compute_weights()
+        elpd, modified_elpd, elpd_bb_sample = self._compute_elpd_and_modifs(loo_logpd=np.array(log_pis))
+        self.elpd.append(elpd)
+        self.modified_elpd.append(modified_elpd)
+        self.elpd_bb_sample.append(elpd_bb_sample)
+        # self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
+
+        self._compute_weights()

@@ -11,8 +11,8 @@ import tensorflow as tf
 
 
 # Losses
+# These compute -p(xn|theta) for all xn independently, returns a matrix. Need to sum over to get the cost.
 
-# these compute -p(xn|theta) for all xn independently, returns a matrix. Need to sum over to get the cost
 def homoscedastic_negloglike_scalar_variance(y_true, y_pred, var_n):
     # var_n is a fixed known scalar
     indpt_outputs = tf.reduce_sum(tf.square(y_true-y_pred) / (2. * var_n) + 0.5 * tf.log(2. * np.pi * var_n), axis=-1)
@@ -26,8 +26,8 @@ def homoscedastic_negloglike_full_covariance(y_true, y_pred, inv_cov_n, logdet_c
                     0.5 * inv_cov_n.shape[0] * tf.log(2 * np.pi) + 0.5 * logdet_cov_n
     return indpt_outputs
 
-# Probability distributions
 
+# Probability distributions
 
 def log_gaussian(x, mean=0., std=1., axis_sum=None, mask_to_keep=None, module='tf'):
     if isinstance(x, np.ndarray):
@@ -119,7 +119,6 @@ def sample_data_bootstrap(X, y, type_bootstrap, sample_aleatoric_func=None, nb=1
 
 
 # Preprocessing functions
-
 
 def compute_weights_shapes(hidden_units, input_dim, output_dim):
     # compute shape of kernels and biases
@@ -324,8 +323,8 @@ def compute_and_return_outputs(y_MC, return_std=False, return_percentiles=(), re
     if return_std:
         outputs.append(y_std)
     if len(return_percentiles) > 0:
-        percentiles = percentiles_from_samples(y_MC, var_aleatoric=var_aleatoric_,
-                                               importance_weights=importance_weights, percentiles=return_percentiles)
+        percentiles = percentiles_from_samples(
+            y_MC, var_aleatoric=var_aleatoric_, importance_weights=importance_weights, percentiles=return_percentiles)
         outputs.append(percentiles)
     if return_MC > 0:
         if aleatoric_in_MC:
@@ -474,103 +473,5 @@ def plot_covariance_matrix(cov, type_cov='correlation', ax=None, labels=None, fo
     plt.colorbar(sc, ax=ax)
     if return_both:
         return fig, ax
-    return ax
-
-
-from scipy.stats import norm
-import statsmodels.api as sm
-def plot_univariate_pdf(samples=None, weights=None, mean=None, std=None, ax=None, figsize=(4, 4), xrange=None,
-                        **kwargs):
-    return_both = False
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-        return_both = True
-    if samples is None:
-        if xrange is None:
-            xrange = [mean - 4 * std, mean + 4 * std]
-        domain = np.linspace(xrange[0], xrange[1], 200)
-        rv = norm(loc=mean, scale=std)
-        ax.plot(domain, rv.pdf(domain), **kwargs)
-    else:
-        if xrange is None:
-            range = np.amax(samples)-np.amin(samples)
-            xrange = [np.amin(samples)-0.02*range, np.amax(samples)+0.02*range]
-        if weights is not None:
-            indices = np.random.choice(samples.size, p=weights, size=2000)
-            samples = samples[indices]
-        dens = sm.nonparametric.KDEUnivariate(samples.astype(np.float64))
-        dens.fit()
-        domain = np.linspace(xrange[0], xrange[1], 200)
-        pdf = [dens.evaluate(d) for d in domain]
-        ax.plot(domain, pdf, **kwargs)
-    if return_both:
-        return fig, ax
-    return ax
-
-
-def plot_ranking_weights(ranking_weights, figsize=(7, 7)):
-    fig, ax = plt.subplots(figsize=figsize)
-    xlabels = []
-    for j, rw in enumerate(ranking_weights):
-        ax.scatter((j+1) * np.ones((rw.size, )), rw.reshape((-1, )), marker='x', color='grey')
-        if j % 2 == 0:
-            xlabels.append(r'$W_{}$'.format(j//2+1))
-        else:
-            xlabels.append(r'$b_{}$'.format(j//2+1))
-    ax.set_xticks(range(1, len(ranking_weights)+1), minor=False)
-    ax.set_xticklabels(xlabels, fontsize=11)
-    ax.grid(True, 'major')
-    return fig, ax
-
-
-def plot_UQ(regressor, X, domain=None, ax=None, figsize=(8, 6),
-           plot_2sig=True, plot_MC=False, plot_one_posterior=False, plot_one_prior=False):
-    """
-    Plot the mean prediction and uncertainty at inputs X
-
-    :param regressor: instance of a UQ regressor
-    :param X: input where to evaluate/plot the regressor
-    :param domain: 1d domain corresponding to X that allows plotting
-    :param ax:
-    :param figsize:
-    :param plot_2sig: plot mean +/- 2 std. dev. intervals?
-    :param plot_MC: plot MC draws from posterior?
-    :param plot_one_posterior: plot one draw from posterior?
-    :param plot_one_prior: plot one draw from prior?
-    :return:
-    """
-    if plot_2sig and plot_MC:
-        raise ValueError('plot_2sig and plot_MC cannot both be True: the user must choose between plotting'
-                         ' mean +/- 2 std. dev. or MC draws from the posterior.')
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    if (domain is None) and (len(X.shape) == 2 and X.shape[1] == 1):
-        domain = X
-    if (domain is None) and (len(X.shape) > 2 or X.shape[1] != 1):
-        raise ValueError('For input X that is not 1-dimensional, provide a 1d domain for the plots')
-    ymean, ystd, yMC = regressor.predict_UQ(domain, output_MC=(plot_MC or plot_one_posterior))
-    ax.plot(domain, ymean, color='black', label='mean prediction')
-    # plot mean +/- 2 std. dev. of the noise term only, in darker shade
-    ax.fill(np.concatenate([domain, domain[::-1]]),
-            np.concatenate([ymean - 2. * np.sqrt(regressor.var_n), (ymean + 2. * np.sqrt(regressor.var_n))[::-1]]),
-            alpha=.7, fc='gray', ec='None', label='aleatoric uncertainty')
-    if not plot_MC:  # predict and plot the variance
-        ystd = np.reshape(ystd, ymean.shape)
-        # plot mean +/- 2 std. dev.
-        ax.fill(np.concatenate([domain, domain[::-1]]),
-                np.concatenate([ymean - 2. * ystd, (ymean + 2. * ystd)[::-1]]),
-                alpha=.3, fc='gray', ec='None', label='aleatoric + epistemic')
-    else:
-        for j in range(yMC.shape[-1]):
-            if j == 0:
-                ax.plot(domain, yMC[:, j], color='grey', alpha=0.1, label='aleatoric + epistemic')
-            else:
-                ax.plot(domain, yMC[:, j], color='grey', alpha=0.1)
-    if plot_one_posterior:
-        # plot one of the post in red
-        ax.plot(domain, yMC[:, 0], color='red', label='one realization of posterior', alpha=0.5)
-    #if plot_one_prior:
-    #    # plot one of the post in red
-    #    ax.plot(domain, yprior[:, 0], color='red', linestyle='-.', label='one realization of prior', alpha=0.3)
     return ax
 
