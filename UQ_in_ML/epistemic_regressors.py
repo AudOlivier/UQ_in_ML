@@ -1918,12 +1918,11 @@ class BayesByBackpropMixture(VIRegressor):
 
 
 class ModelAveraging:
-    def __init__(self, nn_dict, training_data, n_bootstrap=None):
+    def __init__(self, nn_dict, training_data, n_bootstrap=100):
         self.nn = nn_dict
         self.training_data = training_data
-        if n_bootstrap is not None:
-            self.n_bootstrap = n_bootstrap
-            self.deltas_bb = [np.random.dirichlet([1.] * self.training_data[0].shape[0]) for _ in range(n_bootstrap)]
+        self.n_bootstrap = n_bootstrap
+        self.deltas_bb = [np.random.dirichlet([1.] * self.training_data[0].shape[0]) for _ in range(n_bootstrap)]
 
         self.alpha_list = []
         self.random_seed_list = []
@@ -1988,8 +1987,9 @@ class ModelAveraging:
 
 
 class ModelAveragingLOO(ModelAveraging):
-    def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None):
-        super().__init__(nn_dict, training_data)
+    def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None,
+                 n_bootstrap=100):
+        super().__init__(nn_dict, training_data, n_bootstrap=n_bootstrap)
         if alpha_list is not None and random_seed_list is not None:
             for alpha, random_seed in zip(alpha_list, random_seed_list):
                 self.add_one_model(alpha=alpha, random_seed=random_seed, training_dict=training_dict)
@@ -2032,8 +2032,9 @@ class ModelAveragingLOO(ModelAveraging):
 
 
 class ModelAveragingLOOalphaBB(ModelAveraging):
-    def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None):
-        super().__init__(nn_dict, training_data)
+    def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None,
+                 n_bootstrap=100):
+        super().__init__(nn_dict, training_data, n_bootstrap=n_bootstrap)
         if alpha_list is not None and random_seed_list is not None:
             for alpha, random_seed in zip(alpha_list, random_seed_list):
                 if float(alpha) == 0.:

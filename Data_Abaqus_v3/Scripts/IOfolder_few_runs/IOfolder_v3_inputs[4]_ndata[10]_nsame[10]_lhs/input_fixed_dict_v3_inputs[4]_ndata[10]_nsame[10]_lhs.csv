@@ -1,0 +1,2 @@
+mesh_type,n_nodes_per_el,n_inclusions,strain_x,dt,matrix_type_material,fibers_type_material
+quad,4,30,0.05,0.01,plasticity,elasticity
