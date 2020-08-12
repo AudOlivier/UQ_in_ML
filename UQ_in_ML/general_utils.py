@@ -192,42 +192,54 @@ def extract_mask_from_vi_ranking(rank_metric, metric_values, threshold_on_number
     return ranking_bool
 
 
-def do_reset_vi(VI_regressor):
-    """
-    Reset VI to avoid increase in computational complexity (deleted some of its attributes)
-    """
+def save_properties_vi(VI_regressor):
     from .epistemic_regressors import BayesByBackprop, alphaBB, BayesByBackpropMixture
-    alpha_value, ncomp = None, None
-    if isinstance(VI_regressor, alphaBB):
-        alpha_value = VI_regressor.alpha
-    if isinstance(VI_regressor, BayesByBackpropMixture):
-        ncomp = VI_regressor.ncomp
     VI_inputs = {'input_dim': VI_regressor.input_dim,
                  'output_dim': VI_regressor.output_dim,
                  'var_n': VI_regressor.var_n,
                  'hidden_units': VI_regressor.hidden_units,
-                 'activation': VI_regressor.activation}
+                 'activation': VI_regressor.activation,
+                 'random_seed': VI_regressor.random_seed}
     if VI_regressor.learn_prior:
         VI_inputs.update({'prior_means': None, 'prior_stds': None})
     else:
         VI_inputs.update({'prior_means': VI_regressor.prior_means,
                           'prior_stds': VI_regressor.prior_stds})
-    VI_outputs = (VI_regressor.variational_mu, VI_regressor.variational_sigma, VI_regressor.training_data)
+    if isinstance(VI_regressor, alphaBB):
+        VI_inputs['alpha'] = VI_regressor.alpha
+    elif isinstance(VI_regressor, BayesByBackpropMixture):
+        VI_inputs['ncomp'] = VI_regressor.ncomp
+    elif not isinstance(VI_regressor, BayesByBackprop):
+        raise NotImplementedError
+    VI_outputs = {'variational_mu': VI_regressor.variational_mu,
+                  'variational_sigma': VI_regressor.variational_sigma,
+                  'training_data': VI_regressor.training_data}
     if VI_regressor.learn_prior:
-        VI_outputs_prior = (VI_regressor.variational_prior_mu, VI_regressor.variational_prior_sigma)
-    del VI_regressor
-    if alpha_value is not None:
-        VI_regressor = alphaBB(alpha=alpha_value, **VI_inputs)
-    elif ncomp is not None:
-        VI_regressor = BayesByBackpropMixture(ncomp=ncomp, **VI_inputs)
+        VI_outputs.update({'variational_prior_mu': VI_regressor.variational_prior_mu,
+                           'variational_prior_sigma': VI_regressor.variational_prior_sigma})
+    return VI_inputs, VI_outputs
+
+
+def set_properties_vi(VI_inputs, VI_outputs):
+    from .epistemic_regressors import BayesByBackprop, alphaBB, BayesByBackpropMixture
+    if 'alpha' in VI_inputs.keys():
+        VI_regressor = alphaBB(**VI_inputs)
+    elif 'ncomp' in VI_inputs.keys():
+        VI_regressor = BayesByBackpropMixture(**VI_inputs)
     else:
         VI_regressor = BayesByBackprop(**VI_inputs)
-    VI_regressor.variational_mu = VI_outputs[0]
-    VI_regressor.variational_sigma = VI_outputs[1]
-    VI_regressor.training_data = VI_outputs[2]
-    if VI_regressor.learn_prior:
-        VI_regressor.variational_prior_mu = VI_outputs_prior[0]
-        VI_regressor.variational_prior_sigma = VI_outputs_prior[1]
+    for key, val in VI_outputs.items():
+        setattr(VI_regressor, key, val)
+    return VI_regressor
+
+
+def do_reset_vi(VI_regressor):
+    """
+    Reset VI to avoid increase in computational complexity (deleted some of its attributes)
+    """
+    VI_inputs, VI_outputs = save_properties_vi(VI_regressor)
+    del VI_regressor
+    VI_regressor = set_properties_vi(VI_inputs, VI_outputs)
     return VI_regressor
 
 
@@ -337,6 +349,15 @@ def compute_and_return_outputs(y_MC, return_std=False, return_percentiles=(), re
 
 
 # Plot functions
+
+def plot_mean_uq(x, y_uq, type_uq, **kwargs):
+    if type_uq == 'std':
+        plot_mean_std(x=x, y_std=y_uq, **kwargs)
+    elif type_uq == 'perc':
+        plot_mean_percentiles(x=x, y_perc=y_uq, **kwargs)
+    else:
+        return ValueError
+
 
 def plot_mean_std(x, y_std, ax, y_mean=None, var_aleatoric=None,
                   color_mean='black', linestyle_mean='-.', label_mean='mean prediction',

@@ -4,7 +4,7 @@
 # This code provides algorithms to estimate uncertainties within neural networks for regression problems
 # The aleatoric noise is assumed to be homoscedastic and known, see input var_n to all classes.
 
-from .general_utils import *
+from UQ_in_ML.general_utils import *
 
 
 class Regressor:
@@ -921,6 +921,38 @@ class alphaBB(VIRegressor):
                 feed_dict={self.X_: X_pred, self.ns_: ns})
             value = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
         return value
+
+    def compute_all_loo_predictive_densities(self, ns=10000):
+        """
+        Compute log predictive density p(y|data) at new data points (X, y)
+
+        :return:
+        """
+        from scipy.special import logsumexp
+        # get data for prediction (left out during training)
+        X_pred, y_pred = self.training_data
+        # get lso density
+        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=[0, ])
+        # Run the graph to predict output and associated uncertainty
+        feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
+        feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
+        # Set the random seed
+        random_seed = None
+        if self.random_seed is not None:
+            random_seed = self.generate_seed_layers()
+        # Run session: sample ns outputs
+        with tf.Session(graph=self.graph) as sess:
+            sess.run(tf.global_variables_initializer())
+            sampled_weights = sess.run(
+                self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
+            # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
+            all_loglike = -1. * sess.run(
+                self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_pred.astype(np.float32), 0), [ns, 1, 1]),
+                                  y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
+                                  do_sum=False, weights_data=None),
+                feed_dict={self.X_: X_pred, self.ns_: ns})
+            values = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
+        return values
 
 
 ########################################################################################################################
@@ -1965,24 +1997,50 @@ class ModelAveraging:
         self.weights_elpd_bb = np.mean(weights_bb_sample, axis=1)
 
     def predict_uq(self, X, ns, return_std=True, return_percentiles=(2.5, 97.5),
-                   aleatoric_in_std_perc=True, aleatoric_in_MC=False, weights_attribute='weights_modified_elpd'):
+                   aleatoric_in_std_perc=True, aleatoric_in_MC=False, return_MC=0,
+                   weights_attribute='weights_modified_elpd'):
         """
         Predict y for new input X, along with uncertainty
         """
-        all_ns = [int(ns * w_) for w_ in getattr(self, weights_attribute)]
-        print(all_ns)
-        y_MC_all = []
-        for ns_, reg in zip(all_ns, self.regressors):
-            if ns_ > 0:
+        perc_ns = [int(np.round(ns * w_)) for w_ in getattr(self, weights_attribute)]
+        mc_ns = [int(np.round(return_MC * w_)) for w_ in getattr(self, weights_attribute)]
+        y_mean, y_std, y_MC_perc, y_MC_MC = [], [], [], []
+        for ns1, ns2, reg_props in zip(perc_ns, mc_ns, self.regressors):
+            reg = set_properties_vi(*reg_props)
+            outs = reg.predict_uq(
+                X=X, ns=ns, return_MC=0, return_std=return_std, return_percentiles=(), aleatoric_in_MC=False,
+                aleatoric_in_std_perc=aleatoric_in_std_perc)
+            if return_std:
+                y_mean.append(outs[0])
+                y_std.append(outs[1])
+            else:
+                y_mean.append(outs)
+            if return_percentiles and ns1 > 0:
                 _, y_MC = reg.predict_uq(
-                    X=X, ns=ns_, return_MC=ns_, return_std=False, return_percentiles=(), aleatoric_in_MC=False)
-                y_MC_all.append(y_MC)
-        y_MC_all = np.concatenate(y_MC_all, axis=0)
-        print(y_MC_all.shape)
-        # Compute statistical outputs from MC values
-        outputs = compute_and_return_outputs(
-            y_MC=y_MC_all, var_aleatoric=self.nn['var_n'], return_std=return_std, return_percentiles=return_percentiles,
-            return_MC=0, aleatoric_in_std_perc=aleatoric_in_std_perc, aleatoric_in_MC=aleatoric_in_MC)
+                    X=X, ns=ns1, return_MC=ns1, return_std=False, return_percentiles=(), aleatoric_in_MC=False)
+                y_MC_perc.append(y_MC)
+            if return_MC > 0 and ns2 > 0:
+                _, y_MC = reg.predict_uq(X=X, ns=ns2, return_MC=ns2, return_std=False, return_percentiles=(),
+                                         aleatoric_in_MC=aleatoric_in_MC)
+                y_MC_MC.append(y_MC)
+            del reg
+        y_mean = np.array(y_mean)
+        y_mean_out = np.average(y_mean, axis=0, weights=getattr(self, weights_attribute))
+        outputs = (y_mean_out, )
+        if len(y_std) > 0:
+            y_var = np.average(np.array(y_std) ** 2 + (y_mean - y_mean_out) ** 2, axis=0,
+                               weights=getattr(self, weights_attribute))
+            y_std = np.sqrt(y_var)
+            outputs = outputs + (y_std, )
+        if len(y_MC_perc) > 0:
+            y_MC_perc = np.concatenate(y_MC_perc, axis=0)
+            # Compute statistical outputs from MC values
+            _, outputs_perc = compute_and_return_outputs(
+                y_MC=y_MC_perc, var_aleatoric=self.nn['var_n'], return_std=False,
+                return_percentiles=return_percentiles, return_MC=0, aleatoric_in_std_perc=aleatoric_in_std_perc)
+            outputs = outputs + (outputs_perc, )
+        if len(y_MC_MC) > 0:
+            outputs = outputs + (np.concatenate(y_MC_MC, axis=0), )
         return outputs
 
 
@@ -2011,6 +2069,7 @@ class ModelAveragingLOO(ModelAveraging):
             log_pi = reg.compute_predictive_density(
                 X=X_train[np.newaxis, ind_data, :], y=y_train[np.newaxis, ind_data, :], ns=10000)
             log_pis.append(log_pi)
+            del reg
         # compute unnormalized weight and fit to all data
         if alpha == 0:
             reg = BayesByBackprop(analytical_grads=True, random_seed=random_seed, **self.nn)
@@ -2020,7 +2079,8 @@ class ModelAveragingLOO(ModelAveraging):
 
         self.alpha_list.append(alpha)
         self.random_seed_list.append(random_seed)
-        self.regressors.append(reg)
+        self.regressors.append(save_properties_vi(reg))
+        del reg
         self.all_lpd.append(np.array(log_pis))
         elpd, modified_elpd, elpd_bb_sample = self._compute_elpd_and_modifs(loo_logpd=np.array(log_pis))
         self.elpd.append(elpd)
@@ -2046,23 +2106,28 @@ class ModelAveragingLOOalphaBB(ModelAveraging):
         X_train, y_train = self.training_data
         reg = alphaBB(alpha=alpha, random_seed=random_seed, **self.nn)
         reg.fit(X=X_train, y=y_train, **training_dict)
-        log_pis = []
-        for ind_data in range(X_train.shape[0]):
-            # compute log p(yi|data-i)
-            log_pi = reg.compute_lso_predictive_density(leave_factors=[ind_data, ], ns=10000)
-            log_pis.append(log_pi)
+        log_pis = reg.compute_all_loo_predictive_densities(ns=10000)
+        #reg_props = save_properties_vi(reg)
+        #log_pis = []
+        #for ind_data in range(X_train.shape[0]):
+        #    del reg
+        #    reg = set_properties_vi(*reg_props)
+        #    # compute log p(yi|data-i)
+        #    log_pi = reg.compute_lso_predictive_density(leave_factors=[ind_data, ], ns=10000)
+        #    log_pis.append(log_pi)
         #elpd, se, log_pis = reg.compute_elpd(ns=10000, return_log_pis=True)
 
         self.alpha_list.append(alpha)
         self.random_seed_list.append(random_seed)
-        self.regressors.append(reg)
-        self.all_lpd.append(np.array(log_pis)) # should be a matrix
+        self.regressors.append(save_properties_vi(reg))
+        del reg
+        self.all_lpd.append(log_pis) # should be a matrix
         # self.elpd.append(np.sum(log_pis))
         # self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
         # self.elpd.append(elpd)
         # self.error_elpd.append(se)
 
-        elpd, modified_elpd, elpd_bb_sample = self._compute_elpd_and_modifs(loo_logpd=np.array(log_pis))
+        elpd, modified_elpd, elpd_bb_sample = self._compute_elpd_and_modifs(loo_logpd=log_pis)
         self.elpd.append(elpd)
         self.modified_elpd.append(modified_elpd)
         self.elpd_bb_sample.append(elpd_bb_sample)
