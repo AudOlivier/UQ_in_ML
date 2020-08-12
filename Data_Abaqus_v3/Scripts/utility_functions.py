@@ -117,6 +117,206 @@ def plot_covariance_matrix(cov, type_cov='correlation', ax=None, labels=None, fo
     return ax
 
 
+###########################        DATA PROCESSING          ############################## 
+
+
+def extract_input_vars(job_nb, path_IO, extension_file, n_inputs):
+    """ Given a job nb, read the input files and return the vector of inputs for learning """
+    inputsDict = read_input_data(job_nb, path_IO, extension_file)
+    vf = inputsDict['vf']
+    Ef = inputsDict['fibers_properties'][0] / 1e9
+    b, c = inputsDict['matrix_properties'][3] / 1e6, inputsDict['matrix_properties'][4]
+    if n_inputs == 5:
+        clustering = inputsDict['n_per_cluster']
+        return [vf, Ef, b, c, clustering]
+    return [vf, Ef, b, c]
+
+
+def extract_output_vars(job_nb, path_IO, return_nu=False, threshold_perc_ac_yield=0.01, return_pcov=False, threshold_mises=1e3):
+    """ Given a job nb, read the raw output data and return the vector of outputs for learning """
+    dict_mesh = read_output_data(job_nb, path_IO, ext='_outputs_mesh')
+    dict_2 = read_output_data(job_nb, path_IO, ext='_outputs_volume_averages')
+    E, nu, a, b, c = fit_behavior_law_to_field_data(
+        dict_mesh=dict_mesh, dict_av=dict_2, threshold_perc_ac_yield=threshold_perc_ac_yield, return_pcov=return_pcov)
+    outputs_list = [a, b, c, E]
+    if return_nu:
+        outputs_list.append(nu)
+    dict_2 = read_output_data(job_nb, path_IO, ext='_outputs_centroid')
+    perc_above = compute_perc_Mises_above_threshold(dict_mesh=dict_mesh, dict_centroids=dict_2, threshold_mises=threshold_mises)
+    if isinstance(perc_above, list):
+        [outputs_list.append(p) for p in perc_above]
+    else:
+        outputs_list.append(perc_above)
+    return outputs_list
+
+
+def extract_output_vars2(job_nb, path_IO, return_nu=False, a_fixed=400., return_pcov=False, threshold_mises=1e3):
+    """ Given a job nb, read the raw output data and return the vector of outputs for learning """
+    dict_mesh = read_output_data(job_nb, path_IO, ext='_outputs_mesh')
+    dict_2 = read_output_data(job_nb, path_IO, ext='_outputs_volume_averages')
+    E, nu, b, c = fit_behavior_law_to_field_data2(
+        dict_mesh=dict_mesh, dict_av=dict_2, a_fixed=a_fixed, return_pcov=return_pcov)
+    outputs_list = [b, c, E]
+    if return_nu:
+        outputs_list.append(nu)
+    dict_2 = read_output_data(job_nb, path_IO, ext='_outputs_centroid')
+    perc_above = compute_perc_Mises_above_threshold(dict_mesh=dict_mesh, dict_centroids=dict_2, threshold_mises=threshold_mises)
+    if isinstance(perc_above, list):
+        [outputs_list.append(p) for p in perc_above]
+    else:
+        outputs_list.append(perc_above)
+    return outputs_list
+
+
+def fit_behavior_law_to_field_data(dict_mesh, dict_av, threshold_perc_ac_yield=0.01, return_pcov=False):
+    """ Fit parameters E, nu, a, b and c to data (field data, needs to do volume averaging)
+    a is being learnt along with parameters b and c in plasticity law """
+    ind_sep = separate_el_pl(dict_mesh, threshold_perc_ac_yield=threshold_perc_ac_yield)
+    # Linear elastic part: compute E, nu using Hooke Law in plane strain
+    E, nu = compute_E_nu_plane_strain(epsX=dict_av['av_LE'][1:ind_sep, 0], epsY=dict_av['av_LE'][1:ind_sep, 1], 
+                                      sigX=dict_av['av_S'][1:ind_sep, 0], sigZ=dict_av['av_S'][1:ind_sep, 2])
+    # Plastic part: fit power law (a, b, c) to 
+    array_mises, array_peeq = compute_mises_peeq_from_av(dict_av)
+    a = compute_a_parameter(array_mises[ind_sep:], dict_mesh['perc_ac_yield'][ind_sep:], 
+                            threshold_perc_ac_yield=threshold_perc_ac_yield)
+    a = float(a)
+    from scipy.optimize import curve_fit
+    pfit, pcov = curve_fit(lambda x, b, c: a+b*10**2*x**(c/10),
+                           array_peeq[ind_sep:], array_mises[ind_sep:], bounds=(0, np.inf))
+    b, c = pfit[0]*1e2, pfit[1]/10
+    if return_pcov:
+        return E/1e3, nu, a, b, c, pcov
+    return E/1e3, nu, a, b, c
+
+
+def fit_behavior_law_to_field_data2(dict_mesh, dict_av, a_fixed=400., return_pcov=False):
+    """ Fit parameters E, nu, a, b and c to data (field data, needs to do volume averaging)
+    a is fixed here """
+    array_mises, array_peeq = compute_mises_peeq_from_av(dict_av)
+    ind_sep_linear = separate_el_pl(dict_mesh, threshold_perc_ac_yield=0.01)
+    ind_sep = int(sum(array_mises < a_fixed))
+    # Linear elastic part: compute E, nu using Hooke Law in plane strain
+    #E, nu = compute_E_nu_plane_strain(epsX=dict_av['av_LE'][1:ind_sep, 0], epsY=dict_av['av_LE'][1:ind_sep, 1], 
+    #                                  sigX=dict_av['av_S'][1:ind_sep, 0], sigZ=dict_av['av_S'][1:ind_sep, 2])
+    E, nu = compute_E_nu_plane_strain(epsX=dict_av['av_LE'][1:ind_sep_linear, 0], epsY=dict_av['av_LE'][1:ind_sep_linear, 1], 
+                                      sigX=dict_av['av_S'][1:ind_sep_linear, 0], sigZ=dict_av['av_S'][1:ind_sep_linear, 2])
+    # Plastic part: fit power law (a, b, c) to 
+    from scipy.optimize import curve_fit
+    pfit, pcov = curve_fit(lambda x, b, c: a_fixed+b*10**2*x**(c/10),
+                           array_peeq[ind_sep:], array_mises[ind_sep:], bounds=(0, np.inf))
+    b, c = pfit[0]*1e2, pfit[1]/10
+    if return_pcov:
+        return E/1e3, nu, b, c, pcov
+    return E/1e3, nu, b, c
+
+
+# The following functions are helper functions for the functions above
+def compute_E_nu_plane_strain(epsX, epsY, sigX, sigZ=None, sigY=None):
+    if sigZ is not None and sigY is None:
+        s = epsX + epsY
+        r = epsX / (sigX-sigZ)
+        E = (3. * sigZ + s / r) / (s + 2. * r * sigZ)
+        nu = E * epsX / (sigX - sigZ) - 1.
+    elif sigY is not None and sigZ is None:
+        r1 = (sigX+sigY) / (epsX+epsY)
+        r2 = (sigX-sigY) / (epsX-epsY)
+        nu = 0.5 * (1. - r2 / r1)
+        E = (1. + nu) * r2
+    else:
+        raise ValueError('sigZ or sigY should be non None')
+    return np.mean(E), np.mean(nu)
+
+
+def compute_mises_peeq_from_av(dict_av):
+    array_mises = compute_VonMises(sigX=dict_av['av_S'][:, 0], sigY=dict_av['av_S'][:, 1], sigZ=dict_av['av_S'][:, 2], 
+                                   sigXY=dict_av['av_S'][:, 3])
+    array_peeq = compute_PEEQ(epsX=dict_av['av_PE'][:, 0], epsY=dict_av['av_PE'][:, 1], epsZ=dict_av['av_PE'][:, 2], 
+                              epsXY=dict_av['av_PE'][:, 3])
+    return array_mises, array_peeq
+
+
+def compute_VonMises(sigX, sigY, sigZ, sigXY):
+    # See http://www.continuummechanics.org/vonmisesstress.html
+    #fieldX_dev = sigX - 1/3*(sigX+sigY+sigZ)
+    #fieldY_dev = sigY - 1/3*(sigX+sigY+sigZ)
+    #fieldZ_dev = sigZ - 1/3*(sigX+sigY+sigZ)
+    #tmp = fieldX_dev**2+fieldY_dev**2+fieldZ_dev**2+2*(sigXY**2)
+    #field_VonMises = np.sqrt(3/2*tmp)
+    tmp = (sigX-sigY)**2 + (sigX-sigZ)**2 + (sigZ-sigY)**2 + 6*sigXY**2
+    field_VonMises = np.sqrt(1/2*tmp)
+    return field_VonMises
+
+    
+def compute_PEEQ(epsX, epsY, epsZ, epsXY):
+    fieldX_dev = epsX - 1/3*(epsX+epsY+epsZ)
+    fieldY_dev = epsY - 1/3*(epsX+epsY+epsZ)
+    fieldZ_dev = epsZ - 1/3*(epsX+epsY+epsZ)
+    tmp = fieldX_dev**2+fieldY_dev**2+fieldZ_dev**2+2*(epsXY**2)
+    field_PEEQ = np.sqrt(2/3*tmp)
+    return field_PEEQ
+
+
+
+def separate_el_pl(dict_mesh, threshold_perc_ac_yield=0.01):
+    """ Returns the index that separates elastic from plastic behavior 
+    (do a[:ind_sep] for get elastic part of array a and a[ind_sep:] to get plastic part) """
+    mask_elasticity = (dict_mesh['perc_ac_yield'] < threshold_perc_ac_yield)
+    ind_sep = int(sum(mask_elasticity))
+    return ind_sep
+
+
+def compute_a_parameter(stress_pl, perc_ac_yield_pl, threshold_perc_ac_yield=0.01):
+    """ Compute a parameter as the point where perc_ac_yield=threshold. 
+    Note: better to extrapolate from values above plasticity threshold """
+    from scipy.interpolate import interp1d
+    f = interp1d(perc_ac_yield_pl, stress_pl, kind='linear', fill_value='extrapolate')
+    return f(threshold_perc_ac_yield)
+
+
+def compute_perc_Mises_above_threshold(dict_mesh, dict_centroids, threshold_mises):
+    """ This function computes the volume percentage of fibers for which S_mises is above the given threshold (MPa) """
+    flag = False
+    if not isinstance(threshold_mises, list):
+        flag = True
+        threshold_mises = [threshold_mises]
+    # elements that belong to a fiber
+    list_fibers = np.setdiff1d(list(range(dict_mesh['n_el'])), dict_mesh['el_in_matrix'], assume_unique=True)
+    # their mises stress
+    mises_in_fibers = dict_centroids['el_Mises'][list_fibers, -1]
+    # total volume of fibers
+    vol_fibers = np.sum(dict_centroids['el_Vol'][list_fibers, -1])
+    
+    perc_above = [0] * len(threshold_mises)
+    for i, threshold in enumerate(threshold_mises):
+        # the ones that are above the threshold
+        mises_above = [ind for (i, ind) in enumerate(list_fibers) if mises_in_fibers[i] > threshold]
+        # perc of fiber volume with stress above threshold
+        perc_above[i] = np.sum(dict_centroids['el_Vol'][mises_above, -1]) / vol_fibers
+    if flag:
+        return perc_above[0]
+    return perc_above
+
+
+#Functions to normalize the data
+def normalize_from_bounds(X, bounds, type_norm='[0,1]'):
+    if type_norm == '[0,1]':
+        return (X - bounds[:, 0]) / (bounds[:, 1] - bounds[:, 0])
+    elif type_norm == '[-1,1]':
+        return (X - (bounds[:, 1]+bounds[:, 0])/2.) / ((bounds[:, 1]-bounds[:, 0])/2.)
+    
+def unnormalize_from_bounds(X, bounds, type_norm='[0,1]'):
+    if type_norm == '[0,1]':
+        return X * (bounds[:, 1] - bounds[:, 0]) + bounds[:, 0]
+    elif type_norm == '[-1,1]':
+        return X * (bounds[:, 1]-bounds[:, 0])/2. + (bounds[:, 1]+bounds[:, 0])/2.
+    
+def normalize_covariance_from_bounds(covX, bounds, type_norm='[0,1]'):
+    if type_norm == '[0,1]':
+        D = 1. / (bounds[:, 1] - bounds[:, 0])
+    elif type_norm == '[-1,1]':
+        D = 2. / (bounds[:, 1] - bounds[:, 0])
+    return np.matmul(np.matmul(np.diag(D), covX), np.diag(D))
+
 
 ##############################          PLOTS          ############################## 
 
