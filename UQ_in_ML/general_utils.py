@@ -198,8 +198,9 @@ def save_properties_vi(VI_regressor):
                  'output_dim': VI_regressor.output_dim,
                  'var_n': VI_regressor.var_n,
                  'hidden_units': VI_regressor.hidden_units,
-                 'activation': VI_regressor.activation,
-                 'random_seed': VI_regressor.random_seed}
+                 'activation': VI_regressor.activation}
+    if VI_regressor.random_seed is not None:
+        VI_inputs.update({'random_seed': VI_regressor.random_seed})
     if VI_regressor.learn_prior:
         VI_inputs.update({'prior_means': None, 'prior_stds': None})
     else:

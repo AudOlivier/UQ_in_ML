@@ -27,11 +27,11 @@ class Regressor:
     def __init__(self, hidden_units, output_dim=1, input_dim=1, var_n=1e-6, activation=tf.nn.relu, prior_means=0.,
                  prior_stds=1., random_seed=None):
 
-        self._init_attributes(hidden_units, output_dim=output_dim, input_dim=input_dim, var_n=var_n,
-                              activation=activation, prior_means=prior_means, prior_stds=prior_stds)
         self.random_seed = random_seed
         if not (self.random_seed is None or isinstance(self.random_seed, int)):
             raise ValueError
+        self._init_attributes(hidden_units, output_dim=output_dim, input_dim=input_dim, var_n=var_n,
+                              activation=activation, prior_means=prior_means, prior_stds=prior_stds)
         self.training_data = None
 
         # Initialize the tensorflow graph
@@ -40,6 +40,11 @@ class Regressor:
             # Set random seed
             if self.random_seed is not None:
                 tf.set_random_seed(self.random_seed)
+
+            if prior_means == 'starting_point':
+                self.prior_starting_point = True
+                self.prior_means = [tf.Variable(np.zeros(w_shape), trainable=False, dtype=tf.float32)
+                                    for w_shape in self.weights_shape]
 
             # Initialize placeholders
             self.X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, self.input_dim))  # input data
@@ -82,7 +87,9 @@ class Regressor:
             self.learn_prior = True
         else:  # Prior is provided
             self.learn_prior = False
-            if isinstance(prior_means, (float, int)):
+            if prior_means == 'starting_point':
+                self.prior_means = [0., ] * (2 * self.n_uq_layers)
+            elif isinstance(prior_means, (float, int)):
                 self.prior_means = [float(prior_means)] * (2 * self.n_uq_layers)
             elif isinstance(prior_means, (tuple, list)):
                 self.prior_means = [float(pm) for pm in prior_means]
@@ -90,6 +97,7 @@ class Regressor:
                 self.prior_stds = [float(prior_stds)] * (2 * self.n_uq_layers)
             elif isinstance(prior_stds, (tuple, list)):
                 self.prior_stds = [float(pm) for pm in prior_stds]
+
             for p in [self.prior_means, self.prior_stds]:
                 if not (isinstance(p, (list, tuple)) and len(p) == (2 * self.n_uq_layers)
                         and all(isinstance(f, float) for f in p)):
@@ -396,8 +404,14 @@ class VIRegressor(Regressor):
         with tf.Session(graph=self.graph) as sess:
             sess.run(tf.global_variables_initializer())
 
+            # If you are re-staring training, start from the previously saved values
+            if getattr(self, 'prior_starting_point', None) is not None:
+                starting_mu = sess.run(self.tf_variational_mu)
+                sess.run([tf.assign(m, val_) for m, val_ in zip(self.prior_means, starting_mu)])
+
             # Run training loop
             for e in range(epochs):
+                #print(sess.run(self.prior_means[0]))
                 _, loss_history_ = sess.run(
                     [self.grad_step, self.cost],
                     feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
