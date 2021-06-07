@@ -5,9 +5,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import multivariate_normal, rankdata
-from pyDOE import lhs
+#from pyDOE import lhs
 from scipy.stats.distributions import norm
 import tensorflow as tf
+import warnings
+warnings.filterwarnings('ignore')
 
 
 # Losses
@@ -15,7 +17,7 @@ import tensorflow as tf
 
 def homoscedastic_negloglike_scalar_variance(y_true, y_pred, var_n):
     # var_n is a fixed known scalar
-    indpt_outputs = tf.reduce_sum(tf.square(y_true-y_pred) / (2. * var_n) + 0.5 * tf.log(2. * np.pi * var_n), axis=-1)
+    indpt_outputs = tf.reduce_sum(tf.square(y_true-y_pred) / (2. * var_n) + 0.5 * tf.math.log(2. * np.pi * var_n), axis=-1)
     return indpt_outputs
 
 
@@ -23,7 +25,7 @@ def homoscedastic_negloglike_full_covariance(y_true, y_pred, inv_cov_n, logdet_c
     # var_n is a fixed known full covariance, inv_cov_n is the inverse of the covariance matrix
     Y = y_true - y_pred
     indpt_outputs = 0.5 * tf.reduce_sum(tf.multiply(tf.tensordot(Y, inv_cov_n, axes=[[-1], [0]]), Y), axis=-1) + \
-                    0.5 * inv_cov_n.shape[0] * tf.log(2 * np.pi) + 0.5 * logdet_cov_n
+                    0.5 * inv_cov_n.shape[0] * tf.math.log(2 * np.pi) + 0.5 * logdet_cov_n
     return indpt_outputs
 
 
@@ -38,7 +40,7 @@ def log_gaussian(x, mean=0., std=1., axis_sum=None, mask_to_keep=None, module='t
         if mask_to_keep is None:
             return np.sum(multiv_gauss, axis=axis_sum)
         return np.sum(mask_to_keep * multiv_gauss, axis=axis_sum)
-    multiv_gauss = - 0.5 * log2pi - tf.log(std) - 0.5 * ((x - mean) / std) ** 2
+    multiv_gauss = - 0.5 * log2pi - tf.math.log(std) - 0.5 * ((x - mean) / std) ** 2
     if mask_to_keep is None:
         return tf.reduce_sum(multiv_gauss, axis=axis_sum)
     return tf.reduce_sum(tf.cast(mask_to_keep, tf.float32) * multiv_gauss, axis=axis_sum)
@@ -49,7 +51,7 @@ def log_multiv_gaussian(x, mean, cov_chol, axis_sum=None):
     log2pi = np.log(2 * np.pi).astype(np.float32)
     inv_chol = tf.matrix_inverse(cov_chol)
     inv_cov = tf.matmul(tf.transpose(inv_chol), inv_chol)
-    logdet_cov = 2. * tf.reduce_sum(tf.log(tf.diag_part(cov_chol)))    # log det cov = 2 * sum_{i}(log L_{ii})
+    logdet_cov = 2. * tf.reduce_sum(tf.math.log(tf.diag_part(cov_chol)))    # log det cov = 2 * sum_{i}(log L_{ii})
     X = x - mean
     multiv_gauss = - 0.5 * tf.reduce_sum(tf.multiply(tf.tensordot(X, inv_cov, axes=[[-1], [0]]), X), axis=-1) \
                    - 0.5 * d * log2pi - 0.5 * logdet_cov
@@ -64,13 +66,13 @@ def lhs_gaussian(shape, ns, mean=0., std=1.):
 
 def neg_entropy_gauss(std_1, axis_sum=None):
     # Compute E_{p1}[log(p1)] (negative entropy) for a multivariate gaussian with independent dimensions
-    neg_entropy = - 0.5 - tf.log(tf.sqrt(2 * np.pi) * std_1)
+    neg_entropy = - 0.5 - tf.math.log(tf.sqrt(2 * np.pi) * std_1)
     return tf.reduce_sum(neg_entropy, axis=axis_sum)
 
 
 def kl_gauss_gauss(mean_1, std_1, mean_2, std_2, axis_sum=None):
     # Compute KL(p1||p2)=E_{p1}[log(p1/p2)] between multivariate gaussians with independent dimensions
-    kl_all = tf.log(std_2 / std_1) + (std_1 ** 2 + (mean_1 - mean_2) ** 2) / (2. * std_2 ** 2) - 0.5
+    kl_all = tf.math.log(std_2 / std_1) + (std_1 ** 2 + (mean_1 - mean_2) ** 2) / (2. * std_2 ** 2) - 0.5
     return tf.reduce_sum(kl_all, axis=axis_sum)
 
 
@@ -82,7 +84,7 @@ def kl_gauss_mixgauss(mean_1, std_1, mean_2, std_2, compmix_2):
         tf.tile(tf.expand_dims(mean_1, 0), [ncomp, ] + [1, ] * nd),
         tf.tile(tf.expand_dims(std_1, 0), [ncomp, ] + [1, ] * nd),
         mean_2, std_2, axis_sum=list(range(1, 1+nd)))
-    weighted_kl_gauss = tf.log(compmix_2) - kl_gauss
+    weighted_kl_gauss = tf.math.log(compmix_2) - kl_gauss
     return - tf.reduce_logsumexp(weighted_kl_gauss)
 
 

@@ -5,6 +5,8 @@
 # The aleatoric noise is assumed to be homoscedastic and known, see input var_n to all classes.
 
 from UQ_in_ML.general_utils import *
+import warnings
+warnings.filterwarnings('ignore')
 
 
 class Regressor:
@@ -47,10 +49,9 @@ class Regressor:
                                     for w_shape in self.weights_shape]
 
             # Initialize placeholders
-            self.X_ = tf.placeholder(dtype=tf.float32, name='X_', shape=(None, self.input_dim))  # input data
-            self.y_ = tf.placeholder(dtype=tf.float32, name='y_', shape=(None, self.output_dim))  # output data
-            self.ns_ = tf.placeholder(dtype=tf.int32, name='ns_', shape=())  # number of samples in MC approx. of cost
-            self.w_ = tf.placeholder(dtype=tf.float32, name='w_', shape=(None, ))  # weights for data points
+            self.X_ = tf.compat.v1.placeholder(dtype=tf.float32, name='X_', shape=(None, self.input_dim))  # input data
+            self.y_ = tf.compat.v1.placeholder(dtype=tf.float32, name='y_', shape=(None, self.output_dim))  # output data
+            self.ns_ = tf.compat.v1.placeholder(dtype=tf.int32, name='ns_', shape=())  # number of samples in MC approx. of cost
 
     def _init_attributes(self, hidden_units, output_dim, input_dim, var_n, activation, prior_means, prior_stds):
         self.hidden_units = hidden_units
@@ -103,7 +104,7 @@ class Regressor:
                         and all(isinstance(f, float) for f in p)):
                     raise ValueError('Error defining prior_means or prior_stds')
 
-    def neg_log_like(self, y_true, y_pred, do_sum=True, axis_sum=None, weights_data=None):
+    def neg_log_like(self, y_true, y_pred, do_sum=True, axis_sum=None):
         """
         Computes negative log-likelihood -p(D|w)
 
@@ -120,8 +121,6 @@ class Regressor:
         else:
             all_neg_log_like = homoscedastic_negloglike_full_covariance(
                 y_true=y_true, y_pred=y_pred, logdet_cov_n=self.logdet_cov_n, inv_cov_n=self.inv_cov_n)
-        if weights_data is not None:
-            all_neg_log_like = tf.multiply(weights_data, all_neg_log_like)
         if do_sum:
             return tf.reduce_sum(all_neg_log_like, axis=axis_sum)
         return all_neg_log_like
@@ -212,7 +211,7 @@ class Regressor:
             raise ValueError
         weights = []
         for i, (w_shape, mean, std) in enumerate(zip(self.weights_shape, self.prior_means, self.prior_stds)):
-            w = mean + std * tf.random_normal(
+            w = mean + std * tf.random.normal(
                 shape=((ns,) + w_shape), mean=0., stddev=1., seed=(None if random_seed is None else random_seed[i]))
             weights.append(w)
         return weights
@@ -228,8 +227,8 @@ class Regressor:
         """
         if self.learn_prior:
             raise NotImplementedError('Prior should be learnt.')
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             network_weights = sess.run(self.sample_weights_from_prior(ns=ns))
             y_MC = sess.run(
                 self.compute_predictions(X=self.X_, network_weights=network_weights), feed_dict={self.X_: X})
@@ -253,8 +252,8 @@ class Regressor:
         :return y_perc: uq prediction (percentiles), ndarray of shape (n_perc, n_data, ny)
         :return y_MC: samples from posterior, ndarray of shape (return_MC, n_data, ny)
         """
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             y_MC = sess.run(self.compute_predictions(X=self.X_, network_weights=network_weights),
                             feed_dict={self.X_: X})
         outputs = compute_and_return_outputs(
@@ -262,19 +261,34 @@ class Regressor:
             return_MC=return_MC, aleatoric_in_std_perc=aleatoric_in_std_perc, aleatoric_in_MC=aleatoric_in_MC)
         return outputs
 
+    def scaled_posterior_pdf(self, network_weights, xn, yn):
+        #nchains = w.shape[0]
+        #network_weights = []
+        #nc = 0
+        #for ws, wd in zip(self.weights_shape, self.weights_dim):
+        #    # w_ = tf.expand_dims(tf.reshape(w[nc:nc + wd], ws), 0)
+        #    w_ = tf.reshape(w[:, nc:nc + wd], (nchains,) + ws)
+        #    network_weights.append(w_)
+        #    nc += wd
+        preds = self.compute_predictions(X=tf.constant(xn.astype(np.float32)), network_weights=network_weights)
+        log_likelihood = -1. * self.neg_log_like(
+            y_true=tf.constant(yn.astype(np.float32)), y_pred=preds, do_sum=True, axis_sum=-1)
+        log_prior_value = self.log_prior_pdf(network_weights=network_weights, sum_over_ns=False)
+        return log_prior_value + log_likelihood
+
     @staticmethod
     def _sigma(rho, module='tf'):
         """ Compute sigma = log(1+exp(rho)) """
         if module == 'np':
             return np.log(1. + np.exp(rho))
-        return tf.log(1. + tf.exp(rho))
+        return tf.math.log(1. + tf.exp(rho))
 
     @staticmethod
     def _rho(sigma, module='tf'):
         """ Compute rho = log(exp(sigma)-1) """
         if module == 'np':
             return np.log(np.exp(sigma) - 1.)
-        return tf.log(tf.exp(sigma) - 1.)
+        return tf.math.log(tf.exp(sigma) - 1.)
 
 
 ########################################################################################################################
@@ -336,10 +350,10 @@ class VIRegressor(Regressor):
         for layer, (start_std, w_shape, w_dim) in enumerate(zip(start_sigmas, self.weights_shape, self.weights_dim)):
             # Define the parameters of the variational distribution to be trained: theta={mu, rho} for kernel and bias
             mu = tf.Variable(
-                tf.random_normal(shape=w_shape, mean=0., stddev=start_std), trainable=True, dtype=tf.float32)
+                tf.random.normal(shape=w_shape, mean=0., stddev=start_std), trainable=True, dtype=tf.float32)
             rho = tf.Variable(
                 -6.9 * tf.ones(shape=w_shape, dtype=tf.float32), trainable=True, dtype=tf.float32)
-            sigma = tf.log(1. + tf.exp(rho))
+            sigma = tf.math.log(1. + tf.exp(rho))
 
             self.tf_variational_mu.append(mu)
             self.tf_variational_rho.append(rho)
@@ -361,7 +375,27 @@ class VIRegressor(Regressor):
                              for _ in range(2 * self.n_uq_layers - 1)]
         self.prior_stds = [self._sigma(rho) for rho in self.tf_prior_rho] + [tf.constant(1.), ]
 
-    def sample_weights_from_variational(self, ns, random_seed=None, evaluate_log_pdf=False, sum_over_ns=False):
+    def log_approx_posterior_pdf(self, network_weights, sum_over_ns=True):
+        """
+        Computes log(p(w)) for NN weights w.
+
+        :param network_weights: list (length 2 * n_layers) of ndarrays of shape (ns, ) + w_shape
+        :param sum_over_ns: if True, sum prior over ns independent draws, otherwise return a value for all ns weights.
+
+        :return log(p(w))
+        """
+        log_q = 0.
+        # Loop over all layer kernels/biases
+        for layer, (w, w_shape, mean, std) in enumerate(zip(
+                network_weights, self.weights_shape, self.tf_variational_mu, self.tf_variational_sigma)):
+            # compute the log_pdf for this layer kernel/bias and add it
+            log_q += log_gaussian(
+                x=w, mean=mean, std=std, axis_sum=(None if sum_over_ns else list(range(1, 1 + len(w_shape)))),
+            )
+        return log_q
+
+    def sample_weights_from_variational(self, ns, random_seed=None, evaluate_log_pdf=False, sum_over_ns=False,
+                                        truncated=False):
         """
         Sample weights w for the NN from the variational density q_{theta}(w) (gaussian).
 
@@ -373,9 +407,15 @@ class VIRegressor(Regressor):
                 zip(self.tf_variational_mu, self.tf_variational_sigma, self.weights_shape)):
             mu = tf.tile(tf.expand_dims(vi_mu, axis=0), [ns, ] + [1, ] * len(w_shape))
             sigma = tf.tile(tf.expand_dims(vi_sigma, axis=0), [ns, ] + [1, ] * len(w_shape))
-            w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns, ) + w_shape, mean=0., stddev=1.,
-                                                        seed=(None if random_seed is None else random_seed[i]))))
+            if truncated:
+                w = tf.add(
+                    mu, tf.multiply(sigma, tf.truncated_normal(shape=(ns,) + w_shape, mean=0., stddev=1.,
+                                                            seed=(None if random_seed is None else random_seed[i]))))
+
+            else:
+                w = tf.add(
+                    mu, tf.multiply(sigma, tf.random.normal(shape=(ns, ) + w_shape, mean=0., stddev=1.,
+                                                            seed=(None if random_seed is None else random_seed[i]))))
             weights.append(w)
             if evaluate_log_pdf:
                 log_q += log_gaussian(
@@ -385,7 +425,7 @@ class VIRegressor(Regressor):
             return weights, log_q
         return weights
 
-    def fit(self, X, y, weights_data=None, ns=10, epochs=100, verbose=0, lr=0.001):
+    def fit(self, X, y, ns=10, epochs=100, verbose=0, lr=0.001):
         """
         Fit, i.e., find the variational distribution that minimizes the cost function
 
@@ -399,10 +439,8 @@ class VIRegressor(Regressor):
         """
         # Initilize tensorflow session and required variables
         self.training_data = (X, y)
-        if weights_data is None:
-            weights_data = np.ones((X.shape[0], ))
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
 
             # If you are re-staring training, start from the previously saved values
             if getattr(self, 'prior_starting_point', None) is not None:
@@ -414,7 +452,7 @@ class VIRegressor(Regressor):
                 #print(sess.run(self.prior_means[0]))
                 _, loss_history_ = sess.run(
                     [self.grad_step, self.cost],
-                    feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
+                    feed_dict={self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
                 self.loss_history.append(loss_history_)
                 # Save some of the weights
                 if self.weights_to_track is not None:
@@ -464,8 +502,8 @@ class VIRegressor(Regressor):
         if self.random_seed is not None:
             random_seed = self.generate_seed_layers()
         # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             network_weights = sess.run(
                 self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
             y_MC = sess.run(self.compute_predictions(X=self.X_, network_weights=network_weights), feed_dict=feed_dict)
@@ -490,8 +528,8 @@ class VIRegressor(Regressor):
         else:
             means_pruned = self.variational_mu.copy()
         means_pruned = [np.expand_dims(means, axis=0) for means in means_pruned]
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             y_from_mean = sess.run(self.compute_predictions(X=X, network_weights=means_pruned))[0]
         return y_from_mean
 
@@ -572,7 +610,7 @@ class VIRegressor(Regressor):
         :return:
         """
         from scipy.special import logsumexp
-        feed_dict = {self.X_: X, self.y_: y, self.ns_: ns, self.w_: np.ones((X.shape[0], ))}
+        feed_dict = {self.X_: X, self.y_: y, self.ns_: ns}
         if isinstance(self.variational_mu, list):
             feed_dict.update(dict(zip(self.tf_variational_mu, self.variational_mu)))
             feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
@@ -587,15 +625,15 @@ class VIRegressor(Regressor):
         random_seed = None
         if self.random_seed is not None:
             random_seed = self.generate_seed_layers()
-        with tf.Session(graph=self.graph) as sess:
+        with tf.compat.v1.Session(graph=self.graph) as sess:
             # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
-            sess.run(tf.global_variables_initializer())
+            sess.run(tf.compat.v1.global_variables_initializer())
             sampled_weights = sess.run(
                 self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
             all_loglike = -1. * sess.run(
                 self.neg_log_like(y_true=tf.tile(tf.expand_dims(y.astype(np.float32), 0), [ns, 1, 1]),
                                   y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                  do_sum=True, axis_sum=-1, weights_data=None),
+                                  do_sum=True, axis_sum=-1),
                 feed_dict={self.X_: X, self.ns_: ns})
             value = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
         return value
@@ -634,8 +672,8 @@ class BayesByBackprop(VIRegressor):
     """
 
     def __init__(self, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu, prior_means=0.,
-                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer, analytical_grads=False,
-                 random_seed=None):
+                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer,
+                 analytical_grads=False, random_seed=None):
 
         # Initial checks and computations for the network
         super().__init__(hidden_units=hidden_units, input_dim=input_dim, output_dim=output_dim, var_n=var_n,
@@ -668,7 +706,7 @@ class BayesByBackprop(VIRegressor):
                 kl_q_p = 0.
                 for i, (m, std, m0, std0) in enumerate(zip(
                         self.tf_variational_mu, self.tf_variational_sigma, self.prior_means, self.prior_stds)):
-                    kl_q_p += 0.5 * tf.reduce_sum((std ** 2 + (m - m0) ** 2) / std0 ** 2 - 2 * tf.log(std))
+                    kl_q_p += 0.5 * tf.reduce_sum((std ** 2 + (m - m0) ** 2) / std0 ** 2 - 2 * tf.math.log(std))
 
             # Branch to generate predictions
             self.predictions = self.compute_predictions(X=self.X_, network_weights=tf_network_weights)
@@ -676,13 +714,13 @@ class BayesByBackprop(VIRegressor):
             # Compute contribution of likelihood to cost: -log(p(data|w))
             neg_likelihood_term = self.neg_log_like(
                 y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]),
-                y_pred=self.predictions, weights_data=self.w_) / tf.to_float(self.ns_)
+                y_pred=self.predictions) / tf.to_float(self.ns_)
 
             # Cost is based on the KL-divergence minimization
             self.cost = neg_likelihood_term + kl_q_p
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
             self.opt = tf_optimizer(learning_rate=self.lr_)
             var_list = [self.tf_variational_mu, self.tf_variational_rho]
             if self.learn_prior:
@@ -714,7 +752,7 @@ class alphaBB(VIRegressor):
     """
 
     def __init__(self, alpha, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu,
-                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
+                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer,
                  random_seed=None, analytical_grads=False):
 
         # Do the initial checks and computations for the network
@@ -749,7 +787,7 @@ class alphaBB(VIRegressor):
             self.predictions = self.compute_predictions(X=self.X_, network_weights=tf_network_weights)
 
             ndata = tf.shape(self.X_)[0]  # number of independent data points
-            normalization_term = 0.  # contribution of normalization terms to cost: -log(Z(prior))-log(Z(q))
+            normalization_term = 0.  # contribution of normalization terms to cost: log(Z(prior))-log(Z(q))
             log_factor = 0.  # log of the site approximations f: log(f(w))=s(w).T lambda_{f}
 
             # Cost is based on the alpha-divergence minimization
@@ -759,10 +797,10 @@ class alphaBB(VIRegressor):
                 # compute normalization term: log(Z(prior)) / constant if you are not learnign the prior
                 # log(Z)=log(sqrt(2*pi)*sig)+mu**2/(2sig**2)
                 #normalization_term += np.prod(w_shape) * (
-                #        tf.log(prior_std) + 0.5 * tf.square(tf.divide(prior_mean, prior_std)))
+                #        tf.math.log(prior_std) + 0.5 * tf.square(tf.divide(prior_mean, prior_std)))
 
                 # compute normalization term: -log(Z(q))
-                normalization_term -= tf.reduce_sum(tf.log(sigma) + 0.5 * tf.square(tf.divide(mu, sigma)))
+                normalization_term -= tf.reduce_sum(tf.math.log(sigma) + 0.5 * tf.square(tf.divide(mu, sigma)))
 
                 # compute the factor parameters lambda_f, then the log of the site approximations
                 # lmda_q,0 is (mu/sig**2, -1/(2sig**2)), also use lmda=(lmda_q-lmda_0)/ndata
@@ -783,29 +821,28 @@ class alphaBB(VIRegressor):
             # tie factors: use same site approximation for all data points
             log_factor = tf.tile(tf.expand_dims(log_factor, 1), [1, ndata])
             # If bootstrapping: need to modify the weights
-            log_factor = tf.multiply(self.w_, log_factor)
+            #log_factor = tf.multiply(self.w_, log_factor)
             assert len(log_factor.get_shape().as_list()) == 2
             # compute likelihood of all data points n separately
             loglike = -1 * self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions, do_sum=False,
-                weights_data=self.w_)
+                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions, do_sum=False)
             assert len(loglike.get_shape().as_list()) == 2
 
             # compute log(E_{q}[(like_n(w)/f(w)) ** alpha]) for all data points n,
             # expectation is computed by averaging over the ns_ samples
             logexpectation = tf.add(
-                tf.log(1. / tf.to_float(self.ns_)),
+                tf.math.log(1. / tf.to_float(self.ns_)),
                 tf.reduce_logsumexp(self.alpha * tf.subtract(loglike, log_factor), axis=0)
             )
             # cste_over_ns = tf.reduce_max(self.alpha * (loglike - log_factor), axis=0)
             # in_exp = self.alpha * (loglike - log_factor) - tf.tile(tf.expand_dims(cste_over_ns, 0), [self.ns_, 1])
-            # logexpectation = cste_over_ns - tf.log(tf.to_float(self.ns_)) + tf.reduce_logsumexp(in_exp, axis=0)
+            # logexpectation = cste_over_ns - tf.math.log(tf.to_float(self.ns_)) + tf.reduce_logsumexp(in_exp, axis=0)
             # in the cost, sum over all the data points n
             expectation_term = - 1. / self.alpha * tf.reduce_sum(logexpectation)
             self.cost = normalization_term + expectation_term
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
             opt = tf_optimizer(learning_rate=self.lr_)
             var_list = [self.tf_variational_mu, self.tf_variational_rho]
             if not self.analytical_grads:
@@ -822,7 +859,7 @@ class alphaBB(VIRegressor):
                     grads_and_vars[i] = (dmi - mi / si ** 2, mi)
                     # update gradient for rho
                     grads_and_vars[2 * self.n_uq_layers + i] = (drhoi + (1 / si * ((mi / si) ** 2 - 1)) * dsi, rhoi)
-            grads_and_vars = [(tf.where(tf.is_nan(grad), tf.zeros_like(grad), grad), val)
+            grads_and_vars = [(tf.where(tf.math.is_nan(grad), tf.zeros_like(grad), grad), val)
                               for grad, val in grads_and_vars]
             self.grad_step = opt.apply_gradients(grads_and_vars)
 
@@ -864,7 +901,7 @@ class alphaBB(VIRegressor):
             site_approxs_sigma.append(sigma_n)
         return [site_approxs_mu, ], [site_approxs_sigma, ]
 
-    def get_lso_moments(self, leave_factors):
+    def get_lso_moments(self, leave_factors, refit=False):
         # Compute the mean and std of the leave-several-out density
         n_out = len(leave_factors)
         ndata = self.training_data[0].shape[0]
@@ -879,10 +916,49 @@ class alphaBB(VIRegressor):
             lso_sigma.append(sigma_n)
         return lso_mu, lso_sigma
 
-    def predict_uq_from_lso(self, X, leave_factors, ns, return_std=True, return_percentiles=(2.5, 97.5),
-                            aleatoric_in_std_perc=True, ):
-        """ Predict from leave-several-out density. For this case which index it is does not matter """
+    def get_corrected_lso_moments(self, leave_factors, ns=20, lr=0.005, epochs=10):
+        """
+        Computes log(p(w)) for NN weights w.
+
+        :param network_weights: list (length 2 * n_layers) of ndarrays of shape (ns, ) + w_shape
+        :param sum_over_ns: if True, sum prior over ns independent draws, otherwise return a value for all ns weights.
+
+        :return log(p(w))
+        """
+        # get the leave-out data
+        keep_factors = [i for i in range(self.training_data[0].shape[0]) if i not in leave_factors]
+        X = self.training_data[0][keep_factors].astype(np.float32)
+        y = self.training_data[1][keep_factors].astype(np.float32)
+
+        # sample the leave-some-out
         lso_mu, lso_sigma = self.get_lso_moments(leave_factors=leave_factors)
+
+        # Run the graph to update it, i.e train to LOO dataset
+        # feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
+        # feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
+
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
+            sess.run([tf.assign(m, val_) for m, val_ in zip(self.tf_variational_mu, lso_mu)])
+            sess.run([tf.assign(m, val_) for m, val_ in zip(self.tf_variational_rho,
+                                                            [self._rho(s, module='np') for s in lso_sigma])])
+            for e in range(epochs):
+                # print(sess.run(self.prior_means[0]))
+                sess.run(self.grad_step, feed_dict={self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
+
+            # Save the final variational parameters
+            lso_mu, lso_sigma = sess.run(
+                [self.tf_variational_mu, self.tf_variational_sigma], feed_dict={self.ns_: ns})
+        return lso_mu, lso_sigma
+
+    def predict_uq_from_lso(self, X, leave_factors, ns, return_std=True, return_percentiles=(2.5, 97.5),
+                            aleatoric_in_std_perc=True, ns_refit=20, lr_refit=0.001, epochs_refit=0):
+        """ Predict from leave-several-out density. For this case which index it is does not matter """
+        if epochs_refit == 0:
+            lso_mu, lso_sigma = self.get_lso_moments(leave_factors=leave_factors)
+        else:
+            lso_mu, lso_sigma = self.get_corrected_lso_moments(
+                leave_factors=leave_factors, ns=ns_refit, lr=lr_refit, epochs=epochs_refit)
         # Run the graph to predict output and associated uncertainty
         feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
         feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
@@ -892,8 +968,8 @@ class alphaBB(VIRegressor):
         if self.random_seed is not None:
             random_seed = self.generate_seed_layers()
         # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             network_weights = sess.run(
                 self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
             y_MC = sess.run(self.compute_predictions(X=self.X_, network_weights=network_weights), feed_dict=feed_dict)
@@ -923,20 +999,20 @@ class alphaBB(VIRegressor):
         if self.random_seed is not None:
             random_seed = self.generate_seed_layers()
         # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             sampled_weights = sess.run(
                 self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
             # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
             all_loglike = -1. * sess.run(
                 self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_pred.astype(np.float32), 0), [ns, 1, 1]),
                                   y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                  do_sum=True, axis_sum=-1, weights_data=None),
+                                  do_sum=True, axis_sum=-1),
                 feed_dict={self.X_: X_pred, self.ns_: ns})
             value = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
         return value
 
-    def compute_all_loo_predictive_densities(self, ns=10000):
+    def compute_all_loo_predictive_densities(self, ns=10000, LOO=True):
         """
         Compute log predictive density p(y|data) at new data points (X, y)
 
@@ -946,27 +1022,83 @@ class alphaBB(VIRegressor):
         # get data for prediction (left out during training)
         X_pred, y_pred = self.training_data
         # get lso density
-        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=[0, ])
-        # Run the graph to predict output and associated uncertainty
-        feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
-        feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
+        if LOO:
+            lso_mu, lso_sigma = self.get_lso_moments(leave_factors=[0, ])
+            # Run the graph to predict output and associated uncertainty
+            feed_dict = dict(zip(self.tf_variational_mu, lso_mu))
+            feed_dict.update(dict(zip(self.tf_variational_sigma, lso_sigma)))
+        else:
+            feed_dict = dict(zip(self.tf_variational_mu, self.variational_mu))
+            feed_dict.update(dict(zip(self.tf_variational_sigma, self.variational_sigma)))
         # Set the random seed
         random_seed = None
         if self.random_seed is not None:
             random_seed = self.generate_seed_layers()
         # Run session: sample ns outputs
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             sampled_weights = sess.run(
                 self.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
             # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
             all_loglike = -1. * sess.run(
                 self.neg_log_like(y_true=tf.tile(tf.expand_dims(y_pred.astype(np.float32), 0), [ns, 1, 1]),
                                   y_pred=self.compute_predictions(X=self.X_, network_weights=sampled_weights),
-                                  do_sum=False, weights_data=None),
+                                  do_sum=False),
                 feed_dict={self.X_: X_pred, self.ns_: ns})
             values = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
         return values
+
+    def compute_all_loo_predictive_densities_refit(self, ns=10000, ns_refit=20, lr_refit=0.001, epochs_refit=100):
+        """
+        Compute log predictive density p(y|data) at new data points (X, y)
+
+        :return:
+        """
+        from scipy.special import logsumexp
+        import time
+        # get data for prediction (left out during training)
+        X_pred, y_pred = self.training_data
+        # Set the random seed
+        random_seed = None
+        if self.random_seed is not None:
+            random_seed = self.generate_seed_layers()
+        # Run session: sample ns outputs
+        all_outpt = np.empty((0,), dtype=np.float32)
+        lso_mu, lso_sigma = self.get_lso_moments(leave_factors=[0, ])
+        current_reg_props = save_properties_vi(self)[0]
+
+        for i in range(X_pred.shape[0]):
+            keep_factors = [j for j in range(self.training_data[0].shape[0]) if j != i]
+            X = self.training_data[0][keep_factors].astype(np.float32)
+            y = self.training_data[1][keep_factors].astype(np.float32)
+            new_reg = alphaBB(**current_reg_props)
+            new_reg.training_data = (X_pred, y_pred)
+            #new_reg.variational_mu = self.variational_mu.copy()
+            #new_reg.variational_sigma = self.variational_sigma.copy()
+            with tf.compat.v1.Session(graph=new_reg.graph) as sess:
+                sess.run(tf.compat.v1.global_variables_initializer())
+                sess.run([tf.assign(m, val_) for m, val_ in zip(new_reg.tf_variational_mu, lso_mu)])
+                sess.run([tf.assign(m, val_) for m, val_ in zip(new_reg.tf_variational_rho,
+                                                                [new_reg._rho(s, module='np') for s in lso_sigma])])
+                for e in range(epochs_refit):
+                    # print(sess.run(self.prior_means[0]))
+                    sess.run(new_reg.grad_step,
+                             feed_dict={new_reg.X_: X, new_reg.y_: y, new_reg.ns_: ns_refit, new_reg.lr_: lr_refit})
+
+                # Save the final variational parameters
+                network_weights = sess.run(
+                    new_reg.sample_weights_from_variational(ns=ns, random_seed=random_seed))
+                # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
+                all_loglike = -1. * sess.run(
+                    new_reg.neg_log_like(y_true=tf.tile(tf.expand_dims(y_pred[i:i+1].astype(np.float32), 0), [ns, 1, 1]),
+                                      y_pred=self.compute_predictions(X=new_reg.X_, network_weights=network_weights),
+                                      do_sum=False),
+                    feed_dict={new_reg.X_: X_pred[i:i+1], new_reg.ns_: ns})
+                values = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
+            all_outpt = np.concatenate([all_outpt, values], axis=0)
+            del new_reg
+        return all_outpt
+
 
 
 ########################################################################################################################
@@ -984,7 +1116,7 @@ class BayesByBackpropLowRank(VIRegressor):
     """
 
     def __init__(self, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu, prior_means=0.,
-                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
+                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer,
                  rank=1, analytical_grads=False, keep_diag=True):
 
         # Initial checks and computations for the network
@@ -1022,7 +1154,7 @@ class BayesByBackpropLowRank(VIRegressor):
                         tf.transpose(self.tf_variational_amat) / self.tf_variational_sigma ** 2,
                         self.tf_variational_amat)
                 )
-                log_det_term = -0.5 * 2 * tf.reduce_sum(tf.log(tf.diag_part(chol)))
+                log_det_term = -0.5 * 2 * tf.reduce_sum(tf.math.log(tf.diag_part(chol)))
                 m0, var0 = [], []
                 for m, std, w_dim in zip(self.prior_means, self.prior_stds, self.weights_dim):
                     m0 += [m, ] * w_dim
@@ -1032,7 +1164,7 @@ class BayesByBackpropLowRank(VIRegressor):
                 kl_q_p = 0.5 * tf.reduce_sum(
                     (self.tf_variational_sigma ** 2 + (self.tf_variational_mu - m0) ** 2 +
                      tf.reduce_sum(self.tf_variational_amat ** 2, axis=-1)) / var0
-                    - 2 * tf.log(self.tf_variational_sigma))
+                    - 2 * tf.math.log(self.tf_variational_sigma))
                 kl_q_p += log_det_term
 
             # Branch to generate predictions
@@ -1041,14 +1173,14 @@ class BayesByBackpropLowRank(VIRegressor):
             # Compute contribution of likelihood to cost: -log(p(data|w))
             neg_likelihood_term = self.neg_log_like(
                 y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]),
-                y_pred=self.predictions, weights_data=self.w_) / tf.to_float(self.ns_)
+                y_pred=self.predictions) / tf.to_float(self.ns_)
 
             # Cost is based on the KL-divergence minimization
             self.cost = neg_likelihood_term + kl_q_p
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
-            self.flag_epoch = tf.placeholder(tf.int32, shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
+            self.flag_epoch = tf.compat.v1.placeholder(tf.int32, shape=())
             self.opt = tf_optimizer(learning_rate=self.lr_)
             if keep_diag:
                 var_list = [self.tf_variational_mu, self.tf_variational_rho, self.tf_variational_amat]
@@ -1092,12 +1224,12 @@ class BayesByBackpropLowRank(VIRegressor):
         start_sigmas = []
         for std, w_dim in zip(standard_sigmas_aug, self.weights_dim):
             start_sigmas += [std, ] * w_dim
-        self.tf_variational_mu = tf.Variable(tf.random_normal(shape=(self.n_weights, ), mean=0., stddev=start_sigmas),
+        self.tf_variational_mu = tf.Variable(tf.random.normal(shape=(self.n_weights, ), mean=0., stddev=start_sigmas),
                                              trainable=True, dtype=tf.float32)
         self.tf_variational_rho = tf.Variable(-6.9 * tf.ones(shape=(self.n_weights, ), dtype=tf.float32),
                                               trainable=True, dtype=tf.float32)
         self.tf_variational_sigma = self._sigma(self.tf_variational_rho)
-        # self.tf_variational_amat = tf.Variable(tf.random_normal(shape=(self.n_weights, self.rank), mean=0.,
+        # self.tf_variational_amat = tf.Variable(tf.random.normal(shape=(self.n_weights, self.rank), mean=0.,
         #                                                         stddev=0.001 / self.rank),
         #                                        trainable=True, dtype=tf.float32)
         self.tf_variational_amat = tf.Variable(tf.zeros(shape=(self.n_weights, self.rank), dtype=tf.float32),
@@ -1122,8 +1254,8 @@ class BayesByBackpropLowRank(VIRegressor):
         mu = tf.tile(tf.expand_dims(self.tf_variational_mu, axis=0), [ns, 1])
         sigma = tf.tile(tf.expand_dims(self.tf_variational_sigma, axis=0), [ns, 1])
         w = tf.add(
-            tf.multiply(sigma, tf.random_normal(shape=(ns, self.n_weights), mean=0., stddev=1.)),
-            tf.matmul(tf.random_normal(shape=(ns, self.rank), mean=0., stddev=1.),
+            tf.multiply(sigma, tf.random.normal(shape=(ns, self.n_weights), mean=0., stddev=1.)),
+            tf.matmul(tf.random.normal(shape=(ns, self.rank), mean=0., stddev=1.),
                       tf.transpose(self.tf_variational_amat)))
         w = tf.add(w, mu)
         weights = []
@@ -1157,14 +1289,14 @@ class BayesByBackpropLowRank(VIRegressor):
         if weights_data is None:
             weights_data = np.ones((X.shape[0], ))
 
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             # Run training loop
             for e in range(epochs):
                 # Loop over all minibatches
                 _, loss_history_ = sess.run(
                     [self.grad_step, self.cost],
-                    feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
+                    feed_dict={self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
                 self.loss_history.append(loss_history_)
                 # Save some of the weights
                 if self.weights_to_track is not None:
@@ -1193,8 +1325,8 @@ class BayesByBackpropLowRank(VIRegressor):
         feed_dict.update({self.tf_variational_sigma: self.variational_sigma})
         feed_dict.update({self.tf_variational_amat: self.variational_amat})
         feed_dict.update({self.X_: X, self.ns_: ns})
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             y_MC = sess.run(self.predictions, feed_dict=feed_dict)
         outputs = compute_and_return_outputs(
             y_MC=y_MC, var_aleatoric=self.var_n, return_std=return_std, return_percentiles=return_percentiles,
@@ -1223,7 +1355,7 @@ class BayesByBackpropWithCorr(VIRegressor):
     """
 
     def __init__(self, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu, prior_means=0.,
-                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer):
+                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer):
 
         # Initial checks and computations for the network
         super().__init__(hidden_units=hidden_units, input_dim=input_dim, output_dim=output_dim, var_n=var_n,
@@ -1250,8 +1382,7 @@ class BayesByBackpropWithCorr(VIRegressor):
 
             # Compute contribution of likelihood to cost: -log(p(data|w))
             neg_likelihood_term = self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions,
-                weights_data=self.w_)
+                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions)
 
             # Compute the cost from the prior term -log(p(w))
             prior_term = self.log_prior_pdf(network_weights=tf_network_weights, sum_over_ns=True)
@@ -1260,7 +1391,7 @@ class BayesByBackpropWithCorr(VIRegressor):
             self.cost = (neg_likelihood_term - prior_term + var_post_term) / tf.to_float(self.ns_)
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
             self.opt = tf_optimizer(learning_rate=self.lr_)
             var_list = [self.tf_variational_mu, self.tf_variational_rho]
             total_grads_and_vars = self.opt.compute_gradients(self.cost, var_list)
@@ -1305,8 +1436,7 @@ class BayesByBackpropWithCorr(VIRegressor):
                 ns=self.ns_, evaluate_log_pdf=True, sum_over_ns=True)
             self.predictions = self.compute_predictions(X=self.X_, network_weights=tf_network_weights)
             neg_likelihood_term = self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions,
-                weights_data=self.w_)
+                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions)
             prior_term = self.log_prior_pdf(network_weights=tf_network_weights, sum_over_ns=True)
             self.cost = (neg_likelihood_term - prior_term + var_post_term) / tf.to_float(self.ns_)
 
@@ -1338,7 +1468,7 @@ class BayesByBackpropWithCorr(VIRegressor):
             mu = tf.tile(tf.expand_dims(vi_mu, axis=0), [ns, ] + [1, ] * len(w_shape))
             sigma = tf.tile(tf.expand_dims(vi_sigma, axis=0), [ns, ] + [1, ] * len(w_shape))
             w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns,) + w_shape, mean=0., stddev=1.)))
+                mu, tf.multiply(sigma, tf.random.normal(shape=(ns,) + w_shape, mean=0., stddev=1.)))
             weights.append(w)
 
             if evaluate_log_pdf:
@@ -1353,7 +1483,7 @@ class BayesByBackpropWithCorr(VIRegressor):
         mu_vector = tf.concat([tf.boolean_mask(w, m) for (w, m)
                                in zip(self.tf_variational_mu, self.mask_correlation)], axis=0)
         extra_rvs = tf.tile(tf.reshape(mu_vector, (1, d)), [ns, 1]) + tf.matmul(
-            tf.random_normal(shape=(ns, d), mean=0., stddev=1.), tf.transpose(self.tf_chol))
+            tf.random.normal(shape=(ns, d), mean=0., stddev=1.), tf.transpose(self.tf_chol))
         for i, pos in enumerate(self.positions):
             weights[pos[0]][pos[1]] = tf.reshape(extra_rvs[:, i], (ns, ))
         weights = [tf.reshape(tf.stack(w, axis=-1), (ns, ) + w_shape)
@@ -1382,8 +1512,8 @@ class BayesByBackpropWithCorr(VIRegressor):
         if weights_data is None:
             weights_data = np.ones((X.shape[0], ))
 
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
 
             # If you are re-staring training, start from the previously saved values
             if getattr(self, 'variational_mu', None) is not None:
@@ -1396,7 +1526,7 @@ class BayesByBackpropWithCorr(VIRegressor):
                 # Loop over all minibatches
                 _, loss_history_ = sess.run(
                     [self.grad_step, self.cost],
-                    feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
+                    feed_dict={self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
                 self.loss_history.append(loss_history_)
                 # Save some of the weights
                 if self.weights_to_track is not None:
@@ -1438,8 +1568,8 @@ class BayesByBackpropWithCorr(VIRegressor):
         if self.mask_correlation is not None:
             feed_dict.update({self.tf_chol: self.variational_cholesky})
         feed_dict.update({self.X_: X, self.ns_: ns})
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             y_MC = sess.run(self.predictions, feed_dict=feed_dict)
         outputs = compute_and_return_outputs(
             y_MC=y_MC, var_aleatoric=self.var_n, return_std=return_std, return_percentiles=return_percentiles,
@@ -1474,7 +1604,7 @@ class alphaBBLowRank(VIRegressor):
     """
 
     def __init__(self, alpha, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu,
-                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
+                 prior_means=0., prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer,
                  rank=1):
 
         # Initial checks and computations for the network
@@ -1514,7 +1644,7 @@ class alphaBBLowRank(VIRegressor):
                 # compute normalization term: log(Z(prior))
                 # log(Z)=log(sqrt(2*pi)*sig)+mu**2/(2sig**2)
                 normalization_term += np.prod(w_shape) * (
-                        tf.log(prior_std) + 0.5 * tf.square(tf.divide(prior_mean, prior_std)))
+                        tf.math.log(prior_std) + 0.5 * tf.square(tf.divide(prior_mean, prior_std)))
                 m0 += [prior_mean, ] * w_dim
                 var0 += [prior_std ** 2, ] * w_dim
             m0 = tf.constant(m0)
@@ -1537,28 +1667,27 @@ class alphaBBLowRank(VIRegressor):
             assert len(log_factor.get_shape().as_list()) == 2
             # compute likelihood of all data points n separately
             loglike = -1 * self.neg_log_like(
-                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions, do_sum=False,
-                weights_data=self.w_)
+                y_true=tf.tile(tf.expand_dims(self.y_, 0), [self.ns_, 1, 1]), y_pred=self.predictions, do_sum=False)
             assert len(loglike.get_shape().as_list()) == 2
             # compute log(E_{q}[(like_n(w)/f(w)) ** alpha]) for all data points n,
             # expectation is computed by averaging over the ns_ samples
             logexpectation = tf.add(
-                tf.log(1. / tf.to_float(self.ns_)),
+                tf.math.log(1. / tf.to_float(self.ns_)),
                 tf.reduce_logsumexp(self.alpha * tf.subtract(loglike, log_factor), axis=0)
             )
             # cste_over_ns = tf.reduce_max(self.alpha * (loglike - log_factor), axis=0)
             # in_exp = self.alpha * (loglike - log_factor) - tf.tile(tf.expand_dims(cste_over_ns, 0),
             #                                                        [self.ns_, 1])
-            # logexpectation = cste_over_ns - tf.log(tf.to_float(self.ns_)) + tf.reduce_logsumexp(in_exp, axis=0)
+            # logexpectation = cste_over_ns - tf.math.log(tf.to_float(self.ns_)) + tf.reduce_logsumexp(in_exp, axis=0)
             # in the cost, sum over all the data points n
             self.cost = normalization_term - 1. / self.alpha * tf.reduce_sum(logexpectation)
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
             opt = tf_optimizer(learning_rate=self.lr_)
             var_list = [self.tf_variational_mu, self.tf_variational_rho, self.tf_variational_amat]
             total_grads_and_vars = opt.compute_gradients(self.cost, var_list)
-            total_grads_and_vars = [(tf.where(tf.is_nan(grad), tf.zeros_like(grad), grad), val)
+            total_grads_and_vars = [(tf.where(tf.math.is_nan(grad), tf.zeros_like(grad), grad), val)
                                     for grad, val in total_grads_and_vars]
             self.grad_step = opt.apply_gradients(total_grads_and_vars)
 
@@ -1571,7 +1700,7 @@ class alphaBBLowRank(VIRegressor):
         )
         Kmat = tf.matmul(tf.matmul(inv_D, amat), tf.matrix_inverse(tf.transpose(chol_temp)))
         inv_cov = inv_D - tf.matmul(Kmat, tf.transpose(Kmat))
-        log_det_cov = 2 * (tf.reduce_sum(tf.log(tf.diag_part(chol_temp))) + tf.reduce_sum(tf.log(diag_sigmas)))
+        log_det_cov = 2 * (tf.reduce_sum(tf.math.log(tf.diag_part(chol_temp))) + tf.reduce_sum(tf.math.log(diag_sigmas)))
         return inv_cov, log_det_cov
 
     @staticmethod
@@ -1609,12 +1738,12 @@ class alphaBBLowRank(VIRegressor):
         start_sigmas = []
         for std, w_dim in zip(standard_sigmas_aug, self.weights_dim):
             start_sigmas += [std, ] * w_dim
-        self.tf_variational_mu = tf.Variable(tf.random_normal(shape=(self.n_weights, ), mean=0., stddev=start_sigmas),
+        self.tf_variational_mu = tf.Variable(tf.random.normal(shape=(self.n_weights, ), mean=0., stddev=start_sigmas),
                                              trainable=True, dtype=tf.float32)
         self.tf_variational_rho = tf.Variable(-6.9 * tf.ones(shape=(self.n_weights, ), dtype=tf.float32),
                                               trainable=True, dtype=tf.float32)
         self.tf_variational_sigma = self._sigma(self.tf_variational_rho)
-        # self.tf_variational_amat = tf.Variable(tf.random_normal(shape=(self.n_weights, self.rank), mean=0.,
+        # self.tf_variational_amat = tf.Variable(tf.random.normal(shape=(self.n_weights, self.rank), mean=0.,
         #                                                         stddev=0.001 / self.rank),
         #                                        trainable=True, dtype=tf.float32)
         self.tf_variational_amat = tf.Variable(tf.zeros(shape=(self.n_weights, self.rank), dtype=tf.float32),
@@ -1639,8 +1768,8 @@ class alphaBBLowRank(VIRegressor):
         mu = tf.tile(tf.expand_dims(self.tf_variational_mu, axis=0), [ns, 1])
         sigma = tf.tile(tf.expand_dims(self.tf_variational_sigma, axis=0), [ns, 1])
         w = tf.add(
-            tf.multiply(sigma, tf.random_normal(shape=(ns, self.n_weights), mean=0., stddev=1.)),
-            tf.matmul(tf.random_normal(shape=(ns, self.rank), mean=0., stddev=1.),
+            tf.multiply(sigma, tf.random.normal(shape=(ns, self.n_weights), mean=0., stddev=1.)),
+            tf.matmul(tf.random.normal(shape=(ns, self.rank), mean=0., stddev=1.),
                       tf.transpose(self.tf_variational_amat)))
         w = tf.add(w, mu)
         weights = []
@@ -1666,14 +1795,14 @@ class alphaBBLowRank(VIRegressor):
         if weights_data is None:
             weights_data = np.ones((X.shape[0], ))
 
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
             # Run training loop
             for e in range(epochs):
                 # Loop over all minibatches
                 _, loss_history_ = sess.run(
                     [self.grad_step, self.cost],
-                    feed_dict={self.w_: weights_data, self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
+                    feed_dict={self.X_: X, self.y_: y, self.ns_: ns, self.lr_: lr})
                 self.loss_history.append(loss_history_)
                 # Save some of the weights
                 if self.weights_to_track is not None:
@@ -1702,8 +1831,8 @@ class alphaBBLowRank(VIRegressor):
         feed_dict.update({self.tf_variational_sigma: self.variational_sigma})
         feed_dict.update({self.tf_variational_amat: self.variational_amat})
         feed_dict.update({self.X_: X, self.ns_: ns})
-        with tf.Session(graph=self.graph) as sess:
-            sess.run(tf.global_variables_initializer(), feed_dict={self.ns_: ns})
+        with tf.compat.v1.Session(graph=self.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer(), feed_dict={self.ns_: ns})
             y_MC = sess.run(self.predictions, feed_dict=feed_dict)
         outputs = compute_and_return_outputs(
             y_MC=y_MC, var_aleatoric=self.var_n, return_std=return_std, return_percentiles=return_percentiles,
@@ -1733,7 +1862,7 @@ class BayesByBackpropMixture(VIRegressor):
     """
 
     def __init__(self, hidden_units, input_dim=1, output_dim=1, var_n=1e-6, activation=tf.nn.relu, prior_means=0.,
-                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.train.AdamOptimizer,
+                 prior_stds=1., weights_to_track=None, tf_optimizer=tf.compat.v1.train.AdamOptimizer,
                  ncomp=1, lower_bound=False):
 
         # Initial checks and computations for the network
@@ -1782,7 +1911,7 @@ class BayesByBackpropMixture(VIRegressor):
                     #             x=m[j, ...], mean=m[k, ...], std=tf.sqrt(std[j, ...] ** 2 + std[k, ...] ** 2))
                     #     log_zks.append(log_z_kj)
                     # log_zks = tf.stack(log_zks)
-                    var_post_term += tf.reduce_logsumexp(tf.log(1. / self.ncomp) + log_zks)
+                    var_post_term += tf.reduce_logsumexp(tf.math.log(1. / self.ncomp) + log_zks)
                 var_post_term /= self.ncomp
 
                 # Compute the cost from the prior term -log(p(w))
@@ -1790,7 +1919,7 @@ class BayesByBackpropMixture(VIRegressor):
                 for m, std, m0, std0 in zip(
                         self.tf_variational_mu, self.tf_variational_sigma, self.prior_means, self.prior_stds):
                     prior_term += tf.reduce_sum(
-                        - 0.5 * tf.log(2 * np.pi * std0 ** 2)
+                        - 0.5 * tf.math.log(2 * np.pi * std0 ** 2)
                         - 0.5 * (std ** 2 + (m - m0) ** 2) / std0 ** 2)
                 prior_term /= self.ncomp
 
@@ -1806,7 +1935,7 @@ class BayesByBackpropMixture(VIRegressor):
             self.cost = neg_likelihood_term - prior_term + var_post_term
 
             # Set-up the training procedure
-            self.lr_ = tf.placeholder(tf.float32, name='lr_', shape=())
+            self.lr_ = tf.compat.v1.placeholder(tf.float32, name='lr_', shape=())
             self.opt = tf_optimizer(learning_rate=self.lr_)
             var_list = [self.tf_variational_mu, self.tf_variational_rho]
             if self.learn_prior:
@@ -1831,11 +1960,11 @@ class BayesByBackpropMixture(VIRegressor):
         [start_sigmas.extend([std, 0.01]) for std in standard_sigmas]
         for l, (start_std, w_shape, w_dim) in enumerate(zip(start_sigmas, self.weights_shape, self.weights_dim)):
             # Define the parameters of the variational distribution to be trained: theta={mu, rho} for kernel and bias
-            mu = tf.Variable(tf.random_normal(shape=(self.ncomp, ) + w_shape, mean=0., stddev=start_std),
+            mu = tf.Variable(tf.random.normal(shape=(self.ncomp, ) + w_shape, mean=0., stddev=start_std),
                              trainable=True, dtype=tf.float32)
             rho = tf.Variable(-6.9 * tf.ones(shape=(self.ncomp, ) + w_shape, dtype=tf.float32),
                               trainable=True, dtype=tf.float32)
-            sigma = tf.log(1. + tf.exp(rho))
+            sigma = tf.math.log(1. + tf.exp(rho))
 
             self.tf_variational_mu.append(mu)
             self.tf_variational_rho.append(rho)
@@ -1860,7 +1989,7 @@ class BayesByBackpropMixture(VIRegressor):
             mu = tf.tile(tf.expand_dims(vi_mu, axis=0), [ns, ] + [1, ] * lenp1)
             sigma = tf.tile(tf.expand_dims(vi_sigma, axis=0), [ns, ] + [1, ] * lenp1)
             w = tf.add(
-                mu, tf.multiply(sigma, tf.random_normal(shape=(ns, self.ncomp) + w_shape, mean=0., stddev=1.)))
+                mu, tf.multiply(sigma, tf.random.normal(shape=(ns, self.ncomp) + w_shape, mean=0., stddev=1.)))
             w = tf.reshape(w, (ns_local, ) + w_shape)
             weights.append(w)
             if evaluate_log_pdf:
@@ -1869,7 +1998,7 @@ class BayesByBackpropMixture(VIRegressor):
                                       std=tf.tile(tf.expand_dims(vi_sigma, axis=0), [ns_local, ] + [1, ] * lenp1),
                                       axis_sum=list(range(-len(w_shape), 0)))
         if evaluate_log_pdf:
-            log_q += tf.log(1. / tf.cast(self.ncomp, tf.float32))
+            log_q += tf.math.log(1. / tf.cast(self.ncomp, tf.float32))
             if sum_over_ns:
                 log_q = tf.reduce_sum(tf.reduce_logsumexp(log_q, axis=1), axis=None)
             else:
@@ -2060,30 +2189,48 @@ class ModelAveraging:
 
 class ModelAveragingLOO(ModelAveraging):
     def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None,
-                 n_bootstrap=100):
+                 n_bootstrap=100, ns_loo=10000, resample_seed_LOO=0):
         super().__init__(nn_dict, training_data, n_bootstrap=n_bootstrap)
         if alpha_list is not None and random_seed_list is not None:
             for alpha, random_seed in zip(alpha_list, random_seed_list):
-                self.add_one_model(alpha=alpha, random_seed=random_seed, training_dict=training_dict)
+                self.add_one_model(alpha=alpha, random_seed=random_seed, training_dict=training_dict,
+                                   ns_loo=ns_loo, resample_seed_LOO=resample_seed_LOO)
 
-    def add_one_model(self, alpha, random_seed, training_dict):
+    def add_one_model(self, alpha, random_seed, training_dict, ns_loo, resample_seed_LOO):
         print('Adding model with alpha={}'.format(alpha))
         X_train, y_train = self.training_data
         # for ndata regressors
         log_pis = []
-        for ind_data in range(X_train.shape[0]):
-            # fit to data-i
-            indices_data = [i for i in range(X_train.shape[0]) if i != ind_data]
-            if alpha == 0:
-                reg = BayesByBackprop(analytical_grads=True, random_seed=random_seed, **self.nn)
-            else:
-                reg = alphaBB(alpha=alpha, random_seed=random_seed, **self.nn)
-            reg.fit(X=X_train[indices_data, :], y=y_train[indices_data, :], **training_dict)
-            # compute log p(yi|data-i)
-            log_pi = reg.compute_predictive_density(
-                X=X_train[np.newaxis, ind_data, :], y=y_train[np.newaxis, ind_data, :], ns=10000)
-            log_pis.append(log_pi)
-            del reg
+        if resample_seed_LOO == 0:
+            for ind_data in range(X_train.shape[0]):
+                # fit to data-i
+                indices_data = [i for i in range(X_train.shape[0]) if i != ind_data]
+                if alpha == 0:
+                    reg = BayesByBackprop(analytical_grads=True, random_seed=random_seed, **self.nn)
+                else:
+                    reg = alphaBB(alpha=alpha, random_seed=random_seed, **self.nn)
+                reg.fit(X=X_train[indices_data, :], y=y_train[indices_data, :], **training_dict)
+                # compute log p(yi|data-i)
+                log_pi = reg.compute_predictive_density(
+                    X=X_train[np.newaxis, ind_data, :], y=y_train[np.newaxis, ind_data, :], ns=ns_loo)
+                log_pis.append(log_pi)
+                del reg
+        else:
+            for ind_data in range(X_train.shape[0]):
+                tmp_log_pi = np.zeros((resample_seed_LOO, ))
+                for j in range(resample_seed_LOO):
+                    # fit to data-i
+                    indices_data = [i for i in range(X_train.shape[0]) if i != ind_data]
+                    if alpha == 0:
+                        reg = BayesByBackprop(analytical_grads=True, **self.nn)
+                    else:
+                        reg = alphaBB(alpha=alpha, **self.nn)
+                    reg.fit(X=X_train[indices_data, :], y=y_train[indices_data, :], **training_dict)
+                    # compute log p(yi|data-i)
+                    tmp_log_pi[j] = reg.compute_predictive_density(
+                        X=X_train[np.newaxis, ind_data, :], y=y_train[np.newaxis, ind_data, :], ns=ns_loo)
+                    del reg
+                log_pis.append(np.mean(tmp_log_pi))
         # compute unnormalized weight and fit to all data
         if alpha == 0:
             reg = BayesByBackprop(analytical_grads=True, random_seed=random_seed, **self.nn)
@@ -2107,20 +2254,28 @@ class ModelAveragingLOO(ModelAveraging):
 
 class ModelAveragingLOOalphaBB(ModelAveraging):
     def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None,
-                 n_bootstrap=100):
+                 n_bootstrap=100, ns_loo=10000, LOO=True, ns_refit=10, lr_refit=0.001, epochs_refit=0):
         super().__init__(nn_dict, training_data, n_bootstrap=n_bootstrap)
         if alpha_list is not None and random_seed_list is not None:
             for alpha, random_seed in zip(alpha_list, random_seed_list):
                 if float(alpha) == 0.:
                     alpha = 0.0001
-                self.add_one_model(alpha=alpha, random_seed=random_seed, training_dict=training_dict)
+                self.add_one_model(
+                    alpha=alpha, random_seed=random_seed, training_dict=training_dict,
+                    ns_loo=ns_loo, LOO=LOO, ns_refit=ns_refit, lr_refit=lr_refit, epochs_refit=epochs_refit)
 
-    def add_one_model(self, alpha, random_seed, training_dict):
+    def add_one_model(self, alpha, random_seed, training_dict, ns_loo, LOO, ns_refit, lr_refit, epochs_refit):
         print('Adding model with alpha={}'.format(alpha))
         X_train, y_train = self.training_data
         reg = alphaBB(alpha=alpha, random_seed=random_seed, **self.nn)
         reg.fit(X=X_train, y=y_train, **training_dict)
-        log_pis = reg.compute_all_loo_predictive_densities(ns=10000)
+
+        # compute the weight
+        if epochs_refit == 0:
+            log_pis = reg.compute_all_loo_predictive_densities(ns=ns_loo, LOO=LOO)
+        else:
+            log_pis = reg.compute_all_loo_predictive_densities_refit(
+                ns=ns_loo, ns_refit=ns_refit, lr_refit=lr_refit, epochs_refit=epochs_refit)
         #reg_props = save_properties_vi(reg)
         #log_pis = []
         #for ind_data in range(X_train.shape[0]):
@@ -2148,3 +2303,100 @@ class ModelAveragingLOOalphaBB(ModelAveraging):
         # self.error_elpd.append(np.sqrt(np.sum((log_pis - np.mean(log_pis)) ** 2)))
 
         self._compute_weights()
+
+
+class ModelAveragingInfoCriteria:
+    def __init__(self, nn_dict, training_data, alpha_list=None, random_seed_list=None, training_dict=None,
+                 scaling_kic=1.):
+        self.nn = nn_dict
+        self.training_data = training_data
+        self.scaling_kic = scaling_kic
+
+        self.alpha_list = []
+        self.random_seed_list = []
+        self.regressors = []
+
+        self.kic = []
+        self.log_evidence = []
+        self.elpd_dic = []
+        self.elpd_waic = []
+
+        if alpha_list is not None and random_seed_list is not None:
+            for alpha, random_seed in zip(alpha_list, random_seed_list):
+                self.add_one_model(alpha=alpha, random_seed=random_seed, training_dict=training_dict, ns=10000)
+
+    def add_one_model(self, alpha, random_seed, training_dict, ns):
+        print('Adding model with alpha={}'.format(alpha))
+        X_train, y_train = self.training_data
+        if alpha == 0:
+            reg = BayesByBackprop(analytical_grads=True, random_seed=random_seed, **self.nn)
+        else:
+            reg = alphaBB(alpha=alpha, random_seed=random_seed, **self.nn)
+        reg.fit(X=X_train, y=y_train, **training_dict)
+
+        # get samples from posterior and do predictions
+        from scipy.special import logsumexp
+        means_pruned = reg.variational_mu.copy()
+        means_pruned = [np.expand_dims(means, axis=0) for means in means_pruned]
+        feed_dict = dict(zip(reg.tf_variational_mu, reg.variational_mu))
+        feed_dict.update(dict(zip(reg.tf_variational_sigma, reg.variational_sigma)))
+        random_seed = None
+        if reg.random_seed is not None:
+            random_seed = reg.generate_seed_layers()
+        # Run session: sample ns outputs
+        with tf.compat.v1.Session(graph=reg.graph) as sess:
+            sess.run(tf.compat.v1.global_variables_initializer())
+            sampled_weights = sess.run(
+                reg.sample_weights_from_variational(ns=ns, random_seed=random_seed), feed_dict=feed_dict)
+            # log_weight = log(1/N) + logsumexp(log_likelihood_thetais), thetais sampled from posterior
+            all_loglike = -1. * sess.run(
+                reg.neg_log_like(y_true=tf.tile(tf.expand_dims(y_train.astype(np.float32), 0), [ns, 1, 1]),
+                                 y_pred=reg.compute_predictions(X=reg.X_, network_weights=sampled_weights),
+                                 do_sum=False),
+                feed_dict={reg.X_: X_train, reg.ns_: ns})
+            loglike_atMAP = -1. * sess.run(
+                reg.neg_log_like(y_true=tf.tile(tf.expand_dims(y_train.astype(np.float32), 0), [1, 1, 1]),
+                                 y_pred=reg.compute_predictions(X=reg.X_, network_weights=means_pruned),
+                                 do_sum=True),
+                feed_dict={reg.X_: X_train, reg.ns_: 1})
+            logprior_atMAP = sess.run(
+                reg.log_prior_pdf(network_weights=means_pruned, sum_over_ns=True), feed_dict={reg.ns_: 1})
+
+            feed_dict2 = {reg.ns_: 1}
+            feed_dict2.update(dict(zip(reg.tf_variational_mu, reg.variational_mu)))
+            feed_dict2.update(dict(zip(reg.tf_variational_sigma, reg.variational_sigma)))
+            logapproxpost_atMAP = sess.run(
+                reg.log_approx_posterior_pdf(network_weights=means_pruned, sum_over_ns=True), feed_dict=feed_dict2)
+        all_lppd = np.log(1. / ns) + logsumexp(all_loglike, axis=0)
+        all_var_loglike = np.var(all_loglike, axis=0)
+        expect_loglike = np.mean(np.sum(all_loglike, axis=-1), axis=0)
+
+        elpd_dic = loglike_atMAP - 2 * (loglike_atMAP - expect_loglike)
+        elpd_waic = np.sum(all_lppd) - np.sum(all_var_loglike)
+        #bic = - 2 * logprior_atMAP - 2 * loglike_atMAP + reg.n_weights * np.log(X_train.shape[0])
+        kic = - 2 * logprior_atMAP - 2 * loglike_atMAP - reg.n_weights * np.log(2 * np.pi) - 2 * sum(
+            [np.sum(np.log(s).reshape((-1, ))) for s in reg.variational_sigma])
+        logevidence = logprior_atMAP + loglike_atMAP - logapproxpost_atMAP
+
+        # Compute weights
+        from scipy.special import logsumexp
+        self.alpha_list.append(alpha)
+        self.random_seed_list.append(random_seed)
+        self.regressors.append(save_properties_vi(reg))
+        del reg
+        self.elpd_dic.append(elpd_dic)
+        self.elpd_waic.append(elpd_waic)
+        #self.bic.append(bic)
+        self.kic.append(kic)
+        self.log_evidence.append(logevidence)
+
+        self.weights_dic = np.exp(np.array(self.elpd_dic) - logsumexp(self.elpd_dic))
+        tmp_waic = np.array(self.elpd_waic) - max(self.elpd_waic)
+        self.weights_waic = np.exp(tmp_waic - logsumexp(tmp_waic))
+        delta_kic = np.array(self.kic) - min(self.kic)
+        self.weights_kic = np.exp(-0.5 * delta_kic - logsumexp(-0.5 * delta_kic))
+        self.weights_kic_smoothed = np.exp(-0.5 * self.scaling_kic * delta_kic - logsumexp(
+            -0.5 * self.scaling_kic * delta_kic))
+        tmp_evidence = np.array(self.log_evidence) - max(self.log_evidence)
+        self.weights_evidence = np.exp(tmp_evidence - logsumexp(tmp_evidence))
+        return None
